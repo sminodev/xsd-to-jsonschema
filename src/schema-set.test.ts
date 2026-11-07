@@ -17,6 +17,7 @@ describe('paths', () => {
     expect(resolvePath('dir/a.xsd', '../b.xsd')).toBe('b.xsd');
     expect(resolvePath('dir/a.xsd', 'sub/./b.xsd')).toBe('dir/sub/b.xsd');
     expect(resolvePath('a.xsd', '../b.xsd')).toBe('../b.xsd');
+    expect(resolvePath('dir/a.xsd', '..\\types\\b.xsd')).toBe('types/b.xsd');
     expect(normalizePath('/x/../y/z.xsd')).toBe('/y/z.xsd');
   });
 });

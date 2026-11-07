@@ -154,7 +154,7 @@ export class Emitter {
 
   private typeRef(name: QName, atNode: Element): JsonSchema {
     if (name.ns === XS) {
-      return name.local === 'anyType' ? {} : this.simple.schema(name);
+      return name.local === 'anyType' ? {} : this.simple.schema(name, atNode);
     }
     const id = clark(name.ns, name.local);
     const complex = this.set.lookup('complexType', name);
@@ -270,7 +270,7 @@ export class Emitter {
       );
       return schema;
     }
-    const json = this.simple.jsonType(valueType);
+    const json = this.simple.jsonType(valueType, node);
     const out: JsonSchema = { ...schema };
     for (const [keyword, lexical] of [
       ['const', fixed],
@@ -629,16 +629,15 @@ export class Emitter {
       const fragment = emptyFragment();
       let attributes: AttributeProp[] = [];
       const base = this.set.lookup('complexType', baseName);
-      if (derivation.localName === 'extension') {
-        if (base) {
-          const inherited = this.content(base.node, base.doc, seen);
-          this.merge(fragment, inherited.fragment, true);
-          attributes = inherited.attributes;
-        } else if (!(baseName.ns === XS && baseName.local === 'anyType')) {
-          this.problems.error('unknown-type', `base type ${baseQName} is not defined`, this.at(derivation));
-        }
-      } else {
-        attributes = base ? this.content(base.node, base.doc, seen).attributes : [];
+      if (!base && !(baseName.ns === XS && baseName.local === 'anyType')) {
+        this.problems.error('unknown-type', `base type ${baseQName} is not defined`, this.at(derivation));
+      }
+      if (base && derivation.localName === 'extension') {
+        const inherited = this.content(base.node, base.doc, seen);
+        this.merge(fragment, inherited.fragment, true);
+        attributes = inherited.attributes;
+      } else if (base) {
+        attributes = this.content(base.node, base.doc, seen).attributes;
       }
       this.compositor(derivation, doc, fragment);
       return { fragment, attributes: overrideAttributes(attributes, this.attributes(derivation, doc)) };

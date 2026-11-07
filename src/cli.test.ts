@@ -65,6 +65,23 @@ describe('convertFile and the command line', () => {
 
     const badMode = capture();
     expect(run([main, '--date-time', 'x'], badMode.io)).toBe(2);
+
+    const emptyText = capture();
+    expect(run([main, '--root', 'A', '--text-property', ''], emptyText.io)).toBe(2);
+    expect(emptyText.out.stderr).toBe('--text-property must not be empty\n');
+  });
+
+  it('exits with 2 and a message when the entry is a directory or the output cannot be written', () => {
+    const directory = capture();
+    expect(run([join(dir, 'types'), '--root', 'A'], directory.io)).toBe(2);
+    expect(directory.out.stderr).toMatch(/^error missing-file: schema document types could not be read: EISDIR/);
+
+    const { out, io } = capture();
+    io.writeFile = () => {
+      throw new Error('EACCES: permission denied');
+    };
+    expect(run([main, '--root', 'A', '--out', 'locked.json'], io)).toBe(2);
+    expect(out.stderr).toBe('cannot write locked.json: EACCES: permission denied\n');
   });
 
   it('writes to a file with --out and leaves out the xml annotations with --no-xml', () => {
