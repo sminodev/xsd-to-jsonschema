@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "Title": "Order 1",
+  "CustomerRef": "C-7",
+  "Express": false,
+  "Level": 0,
+  "DeliveryDate": "2026-11-20",
+  "Contact": {
+    "Email": "orders@example.com"
+  },
+  "Line": [
+    {
+      "Item": "Paper",
+      "Quantity": 2,
+      "Tag": [
+        "A4"
+      ],
+      "Packaging": {
+        "Box": "M",
+        "Weight": 2.5
+      }
+    },
+    {
+      "Item": "Pens",
+      "Quantity": 10
+    }
+  ]
+}
