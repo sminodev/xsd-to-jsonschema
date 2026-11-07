@@ -417,6 +417,10 @@ export class Emitter {
   /** Adds one particle of a sequence or all to `fragment`. */
   private particle(child: Element, doc: SchemaDocument, fragment: Fragment, seen: Set<Element>): void {
     const { min, max } = occurs(child);
+    if (max === 0) {
+      // XML Schema maps a particle with maxOccurs="0" to nothing: the element may not occur.
+      return;
+    }
     switch (child.localName) {
       case 'element': {
         const prop = this.elementProperty(child, doc);
@@ -520,6 +524,9 @@ export class Emitter {
   private choice(node: Element, doc: SchemaDocument, optional: boolean, seen: Set<Element>): Fragment {
     const branches: { fragment: Fragment; node: Element }[] = [];
     for (const child of xsChildren(node)) {
+      if (occurs(child).max === 0) {
+        continue;
+      }
       const branch = emptyFragment();
       this.particle(child, doc, branch, seen);
       if (child.localName !== 'element' && occurs(child).min === 0) {
@@ -612,7 +619,7 @@ export class Emitter {
     }
     const simpleContent = xsChild(node, 'simpleContent');
     if (simpleContent) {
-      return this.simpleContent(simpleContent, doc);
+      return this.simpleContent(simpleContent, doc, seen);
     }
     const complexContent = xsChild(node, 'complexContent');
     const derivation = complexContent ? xsChildren(complexContent)[0] : undefined;
@@ -648,7 +655,15 @@ export class Emitter {
     }
   }
 
-  private simpleContent(node: Element, doc: SchemaDocument): { fragment: Fragment; attributes: AttributeProp[] } {
+  /**
+   * Text and attributes. The base is a simple type, or a complex type with simple content whose text and attributes
+   * are inherited.
+   */
+  private simpleContent(
+    node: Element,
+    doc: SchemaDocument,
+    seen: Set<Element>,
+  ): { fragment: Fragment; attributes: AttributeProp[] } {
     const fragment = emptyFragment();
     const derivation = xsChildren(node)[0];
     if (!derivation) {
@@ -657,19 +672,36 @@ export class Emitter {
     if (derivation.localName !== 'extension') {
       this.problems.error(
         'unsupported-simple-content',
-        'simpleContent restriction is not supported; the text is written as a string',
+        'simpleContent restriction is not supported; its facets are not applied',
         this.at(derivation),
       );
     }
-    const base = this.set.resolveQName(derivation, attr(derivation, 'base') ?? '');
-    const complexBase = base.ns !== XS && this.set.lookup('complexType', base);
-    let value: JsonSchema = complexBase ? { type: 'string' } : this.typeRef(base, derivation);
-    if (this.options.xml) {
-      value = { ...value, xml: { text: true } };
+    const baseQName = attr(derivation, 'base') ?? '';
+    const baseName = this.set.resolveQName(derivation, baseQName);
+    const complexBase = baseName.ns === XS ? undefined : this.set.lookup('complexType', baseName);
+    let value: JsonSchema | undefined;
+    let inherited: AttributeProp[] = [];
+    if (complexBase) {
+      const base = this.content(complexBase.node, complexBase.doc, seen);
+      inherited = base.attributes;
+      value = base.fragment.props.find((prop) => prop.key === this.options.textProperty)?.schema;
+      if (value === undefined) {
+        this.problems.error(
+          'unsupported-simple-content',
+          `base type ${baseQName} has no simple content; the text is written as a string`,
+          this.at(derivation),
+        );
+      }
+    }
+    if (value === undefined) {
+      value = complexBase ? { type: 'string' } : this.typeRef(baseName, derivation);
+      if (this.options.xml) {
+        value = { ...value, xml: { text: true } };
+      }
     }
     fragment.props.push({ key: this.options.textProperty, schema: value, node: derivation });
     fragment.required.push(this.options.textProperty);
-    return { fragment, attributes: this.attributes(derivation, doc).filter((a) => !a.prohibited) };
+    return { fragment, attributes: overrideAttributes(inherited, this.attributes(derivation, doc)) };
   }
 
   /** The object schema of a complex type. */
