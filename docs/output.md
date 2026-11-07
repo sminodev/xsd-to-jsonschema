@@ -28,7 +28,8 @@ with the generated [`order.schema.json`](../examples/order/order.schema.json). T
   restriction uses its own content model and keeps the attributes of the base type, except those marked
   `prohibited`.
 - For an element with text and attributes (`simpleContent` with `extension`), the text goes into a property called
-  `value` (see the `textProperty` option), marked with `"xml": {"text": true}`.
+  `value` (see the `textProperty` option), marked with `"xml": {"text": true}`. If the base is a complex type with
+  simple content, the text type and the attributes of the base are kept.
 - A property is required if its element has `minOccurs` of 1 or more inside a required group, or if its attribute
   has `use="required"`.
 
@@ -37,6 +38,7 @@ with the generated [`order.schema.json`](../examples/order/order.schema.json). T
 | XML Schema                       | JSON Schema                                                                                                      |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `maxOccurs` > 1                  | an array: `{"type": "array", "items": …}` with `minItems` (if `minOccurs` > 0) and `maxItems` (unless unbounded) |
+| `maxOccurs="0"`                  | nothing: the element may not occur, so the closed object rejects it                                              |
 | sequence, `all`, group reference | the properties of their particles, in the enclosing object                                                       |
 | sequence with `minOccurs="0"`    | optional properties; `dependentRequired` makes sure that once one of them is there, the required ones are too    |
 | choice                           | a `oneOf` with one branch per particle: the branch requires its own properties and sets the others to `false`    |

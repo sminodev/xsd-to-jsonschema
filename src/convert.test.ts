@@ -161,6 +161,50 @@ describe('convert', () => {
     });
   });
 
+  describe('content models', () => {
+    it('leave out particles with maxOccurs 0, since XML Schema does not allow them to occur', () => {
+      // libxml2 accepts such elements anyway, so this is no case for the differential tests.
+      const { schema: out, problems } = convert({
+        files: {
+          'a.xsd': schema(`<xs:element name="A"><xs:complexType><xs:sequence>
+            <xs:element name="Kept" type="xs:string"/>
+            <xs:element name="Gone" type="xs:string" minOccurs="0" maxOccurs="0"/>
+            <xs:choice>
+              <xs:element name="X" type="xs:string"/>
+              <xs:sequence minOccurs="0" maxOccurs="0"><xs:element name="Y" type="xs:string"/></xs:sequence>
+            </xs:choice>
+          </xs:sequence></xs:complexType></xs:element>`),
+        },
+        entry: 'a.xsd',
+      });
+      expect(problems).toEqual([]);
+      expect(Object.keys(out?.properties ?? {})).toEqual(['Kept', 'X']);
+      expect(out?.oneOf).toEqual([{ required: ['X'] }]);
+    });
+
+    it('inherit the text and the attributes of a complex type with simple content', () => {
+      const { schema: out, problems } = convert({
+        files: {
+          'a.xsd': schema(`<xs:element name="A" type="Limited"/>
+            <xs:complexType name="Price"><xs:simpleContent><xs:extension base="xs:decimal">
+              <xs:attribute name="currency" type="xs:string" use="required"/>
+              <xs:attribute name="note" type="xs:string"/>
+            </xs:extension></xs:simpleContent></xs:complexType>
+            <xs:complexType name="Limited"><xs:simpleContent><xs:restriction base="Price">
+              <xs:maxInclusive value="100"/><xs:attribute name="note" use="prohibited"/>
+            </xs:restriction></xs:simpleContent></xs:complexType>`),
+        },
+        entry: 'a.xsd',
+      });
+      expect(codes(problems)).toEqual(['unsupported-simple-content']);
+      expect(out?.properties).toEqual({
+        currency: { type: 'string', xml: { attribute: true } },
+        value: { type: 'number', xml: { text: true } },
+      });
+      expect(out?.required).toEqual(['currency', 'value']);
+    });
+  });
+
   describe('values', () => {
     it('give enumerations, fixed and default values the JSON type of the declared type', () => {
       const { schema: out } = convert({

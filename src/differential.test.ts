@@ -357,6 +357,7 @@ describe('convert: XML Schema and JSON Schema agree', () => {
 			<xs:sequence>
 				<xs:element name="Person" type="Employee"/>
 				<xs:element name="Price" type="Price"/>
+				<xs:element name="Offer" type="Offer" minOccurs="0"/>
 			</xs:sequence>
 		</xs:complexType>
 	</xs:element>
@@ -381,8 +382,16 @@ describe('convert: XML Schema and JSON Schema agree', () => {
 				<xs:attribute name="currency" type="xs:string" use="required"/>
 			</xs:extension>
 		</xs:simpleContent>
+	</xs:complexType>
+	<xs:complexType name="Offer">
+		<xs:simpleContent>
+			<xs:extension base="Price">
+				<xs:attribute name="until" type="xs:date"/>
+			</xs:extension>
+		</xs:simpleContent>
 	</xs:complexType>`),
     };
+    const person = '<Person id="p"><Name>n</Name><Staff>3</Staff></Person>';
     const price = '<Price currency="EUR">1.5</Price>';
     await check(files, {
       valid: [instance(`<Person id="p"><Name>n</Name><Staff>3</Staff></Person>${price}`), true],
@@ -393,6 +402,10 @@ describe('convert: XML Schema and JSON Schema agree', () => {
         false,
       ],
       noCurrency: [instance('<Person id="p"><Name>n</Name><Staff>3</Staff></Person><Price>1</Price>'), false],
+      offer: [instance(`${person}${price}<Offer currency="EUR" until="2026-11-30">1.2</Offer>`), true],
+      offerNoCurrency: [instance(`${person}${price}<Offer until="2026-11-30">1.2</Offer>`), false],
+      offerBadValue: [instance(`${person}${price}<Offer currency="EUR">x</Offer>`), false],
+      offerBadUntil: [instance(`${person}${price}<Offer currency="EUR" until="soon">1.2</Offer>`), false],
     });
   });
 
