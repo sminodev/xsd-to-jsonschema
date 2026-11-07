@@ -22,13 +22,16 @@ Problems are printed to stderr.
 Exit codes:
   0  schema written
   1  schema written, but the conversion reported errors (only with --strict)
-  2  no schema written: bad arguments, an unreadable entry schema, or a missing or unknown root element`;
+  2  no schema written: bad arguments, an unreadable entry schema, a missing or unknown
+     root element, or an output file that can't be written`;
 
 export interface Io {
   stdout(text: string): void;
   stderr(text: string): void;
   writeFile(path: string, text: string): void;
 }
+
+const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 const processIo: Io = {
   stdout: (text) => process.stdout.write(text),
@@ -54,7 +57,7 @@ export function run(argv: string[], io: Io = processIo): number {
       },
     });
   } catch (e) {
-    io.stderr(`${(e as Error).message}\n\n${USAGE}\n`);
+    io.stderr(`${messageOf(e)}\n\n${USAGE}\n`);
     return 2;
   }
   const { values, positionals } = parsed;
@@ -72,6 +75,10 @@ export function run(argv: string[], io: Io = processIo): number {
     io.stderr('--date-time must be format or pattern\n');
     return 2;
   }
+  if (values['text-property'] === '') {
+    io.stderr('--text-property must not be empty\n');
+    return 2;
+  }
   const { schema, problems } = convertFile(entry, {
     root: values.root,
     options: { dateTime, xml: !values['no-xml'], textProperty: values['text-property'] },
@@ -85,7 +92,12 @@ export function run(argv: string[], io: Io = processIo): number {
   }
   const text = `${JSON.stringify(schema, null, 2)}\n`;
   if (values.out) {
-    io.writeFile(values.out, text);
+    try {
+      io.writeFile(values.out, text);
+    } catch (e) {
+      io.stderr(`cannot write ${values.out}: ${messageOf(e)}\n`);
+      return 2;
+    }
   } else {
     io.stdout(text);
   }

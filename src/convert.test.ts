@@ -116,10 +116,11 @@ describe('convert', () => {
       expect(out?.properties?.['B']).toEqual({ type: 'string', contentEncoding: 'base64' });
     });
 
-    it('reject an unknown dateTime mode', () => {
+    it('reject an unknown dateTime mode and an empty textProperty', () => {
       expect(() => convert({ files, entry: 'a.xsd', options: { dateTime: 'x' as unknown as 'format' } })).toThrow(
         TypeError,
       );
+      expect(() => convert({ files, entry: 'a.xsd', options: { textProperty: '' } })).toThrow(TypeError);
     });
   });
 
@@ -158,6 +159,34 @@ describe('convert', () => {
           ),
         ),
       ).toEqual(['ambiguous-choice']);
+      expect(problemsOf(type('><xs:complexContent><xs:restriction base="Missing"/></xs:complexContent>'))).toEqual([
+        'unknown-type',
+      ]);
+    });
+
+    it('for facet values that are no counts, leaving the facet out', () => {
+      const { schema: out, problems } = convert({
+        files: {
+          'a.xsd': schema(`<xs:element name="A"><xs:simpleType><xs:restriction base="xs:decimal">
+            <xs:totalDigits value="0"/><xs:fractionDigits value="two"/>
+          </xs:restriction></xs:simpleType></xs:element>`),
+        },
+        entry: 'a.xsd',
+      });
+      expect(codes(problems)).toEqual(['invalid-facet', 'invalid-facet']);
+      expect(problems[1]?.message).toBe('fractionDigits needs a non-negative integer, not "two"');
+      expect(out).toEqual(expect.objectContaining({ type: 'number' }));
+      expect(JSON.stringify(out)).not.toMatch(/null|multipleOf|Minimum|Maximum/);
+    });
+
+    it('with the file and line of the node that names an unknown type', () => {
+      const files = {
+        'a.xsd': schema(`<xs:element name="A" type="xs:strng"/>
+          <xs:element name="B"><xs:simpleType><xs:restriction base="Missing"/></xs:simpleType></xs:element>`),
+      };
+      const [a, b] = ['A', 'B'].map((root) => convert({ files, entry: 'a.xsd', root }).problems);
+      expect(a).toEqual([expect.objectContaining({ code: 'unknown-type', file: 'a.xsd', line: 1 })]);
+      expect(b).toEqual([expect.objectContaining({ code: 'unknown-type', file: 'a.xsd', line: 2 })]);
     });
   });
 

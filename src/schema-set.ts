@@ -31,6 +31,8 @@ export type SchemaSource = Readonly<Record<string, string>> | ((path: string) =>
 
 const isElement = (node: Node): node is Element => node.nodeType === 1;
 
+const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 /** The XML Schema element children of a node, without annotations. */
 export function xsChildren(node: Node): Element[] {
   const out: Element[] = [];
@@ -78,8 +80,12 @@ export function clark(ns: string, local: string): string {
   return `{${ns}}${local}`;
 }
 
-/** Joins a relative path to the directory of `from` and normalizes `.` and `..`, with `/` as separator. */
+/**
+ * Joins a relative path to the directory of `from` and normalizes `.` and `..`, with `/` as separator. Backslashes in
+ * `relative` count as `/`, as schemas written on Windows sometimes use them in schemaLocation.
+ */
 export function resolvePath(from: string, relative: string): string {
+  relative = relative.replace(/\\/g, '/');
   const base = from.includes('/') ? from.slice(0, from.lastIndexOf('/') + 1) : '';
   return normalizePath(relative.startsWith('/') ? relative : base + relative);
 }
@@ -145,8 +151,9 @@ export class SchemaSet {
     let text: string | undefined;
     try {
       text = this.read(path);
-    } catch {
-      text = undefined;
+    } catch (e) {
+      this.problems.error('missing-file', `schema document ${path} could not be read: ${messageOf(e)}`, from);
+      return undefined;
     }
     if (text === undefined || text === null) {
       this.problems.error('missing-file', `schema document ${path} not found`, from);
@@ -163,7 +170,7 @@ export class SchemaSet {
       }).parseFromString(String(text).replace(/^[\uFEFF\s]+/, ''), 'text/xml');
       root = xml.documentElement;
     } catch (e) {
-      this.problems.error('invalid-xml', `${path}: ${(e as Error).message}`, { file: path });
+      this.problems.error('invalid-xml', `${path}: ${messageOf(e)}`, { file: path });
       return undefined;
     }
     if (!root || root.namespaceURI !== XS || root.localName !== 'schema') {

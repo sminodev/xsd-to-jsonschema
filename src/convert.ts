@@ -46,6 +46,9 @@ export function convert({ files, entry, root, options = {} }: ConvertInput): Con
   if (settings.dateTime !== 'format' && settings.dateTime !== 'pattern') {
     throw new TypeError(`options.dateTime must be "format" or "pattern", not ${String(settings.dateTime)}`);
   }
+  if (typeof settings.textProperty !== 'string' || settings.textProperty === '') {
+    throw new TypeError('options.textProperty must be a non-empty string');
+  }
   const problems = new Problems();
   const set = new SchemaSet(files, problems);
   const doc = set.load(entry);

@@ -120,9 +120,18 @@ interface Derivation {
   variety: 'atomic' | 'list' | 'union';
   /** restriction steps, base first */
   steps: { node: Element; facets: Element[] }[];
-  /** a named type that is not defined */
-  missing?: QName;
+  /** a named type that is not defined, and the node that names it */
+  missing?: { name: QName; from: Element | undefined };
 }
+
+/** Facets whose value counts something, with the smallest value they allow. */
+const COUNTING_FACETS: Record<string, number> = {
+  length: 0,
+  minLength: 0,
+  maxLength: 0,
+  fractionDigits: 0,
+  totalDigits: 1,
+};
 
 interface Bound {
   value: number;
@@ -136,23 +145,27 @@ export class SimpleTypes {
     private readonly options: SimpleTypeOptions,
   ) {}
 
-  private at(node: Element): At {
-    return { file: this.set.pathOf(node), node };
+  private at(node: Element | undefined): At | undefined {
+    return node && { file: this.set.pathOf(node), node };
   }
 
-  /** Follows a simple type down to its built-in type. */
-  derive(type: SimpleTypeRef, seen = new Set<Element>()): Derivation {
+  /**
+   * Follows a simple type down to its built-in type.
+   *
+   * @param from - the node that names the type, where problems with the name are reported
+   */
+  derive(type: SimpleTypeRef, from?: Element, seen = new Set<Element>()): Derivation {
     if (!isElement(type)) {
       if (type.ns === XS) {
         if (!isKnownBuiltin(type.local)) {
-          this.problems.error('unknown-type', `xs:${type.local} is no built-in type`);
+          this.problems.error('unknown-type', `xs:${type.local} is no built-in type`, this.at(from));
           return { builtin: 'string', variety: 'atomic', steps: [] };
         }
         return { builtin: type.local, variety: 'atomic', steps: [] };
       }
       const found = this.set.lookup('simpleType', type);
       if (!found) {
-        return { builtin: 'anySimpleType', variety: 'atomic', steps: [], missing: type };
+        return { builtin: 'anySimpleType', variety: 'atomic', steps: [], missing: { name: type, from } };
       }
       type = found.node;
     }
@@ -167,9 +180,9 @@ export class SimpleTypes {
       const inner = xsChild(restriction, 'simpleType');
       const derivation: Derivation =
         base !== undefined
-          ? this.derive(this.set.resolveQName(restriction, base), seen)
+          ? this.derive(this.set.resolveQName(restriction, base), restriction, seen)
           : inner
-            ? this.derive(inner, seen)
+            ? this.derive(inner, restriction, seen)
             : { builtin: 'anySimpleType', variety: 'atomic', steps: [] };
       const facets = xsChildren(restriction).filter((child) => child.localName !== 'simpleType');
       return { ...derivation, steps: [...derivation.steps, { node: restriction, facets }] };
@@ -184,8 +197,8 @@ export class SimpleTypes {
   }
 
   /** The JSON type of a simple type, used to convert fixed and default values. */
-  jsonType(type: SimpleTypeRef): JsonType | undefined {
-    const derivation = this.derive(type);
+  jsonType(type: SimpleTypeRef, from?: Element): JsonType | undefined {
+    const derivation = this.derive(type, from);
     if (derivation.variety !== 'atomic') {
       return 'string';
     }
@@ -220,13 +233,17 @@ export class SimpleTypes {
     return schema;
   }
 
-  /** JSON Schema of a simple type: the built-in type with the facets of all restriction steps merged. */
-  schema(type: SimpleTypeRef): JsonSchema {
-    const derivation = this.derive(type);
+  /**
+   * JSON Schema of a simple type: the built-in type with the facets of all restriction steps merged.
+   *
+   * @param from - the node that names the type, where problems with the name are reported
+   */
+  schema(type: SimpleTypeRef, from?: Element): JsonSchema {
+    const derivation = this.derive(type, from);
     const at = isElement(type) ? this.at(type) : undefined;
     if (derivation.missing) {
-      const m = derivation.missing;
-      this.problems.error('unknown-type', `simple type {${m.ns}}${m.local} is not defined`);
+      const { name, from: namedAt } = derivation.missing;
+      this.problems.error('unknown-type', `simple type {${name.ns}}${name.local} is not defined`, this.at(namedAt));
       return {};
     }
     if (derivation.variety === 'list') {
@@ -266,6 +283,12 @@ export class SimpleTypes {
       for (const facet of step.facets) {
         const value = attr(facet, 'value') ?? '';
         const facetAt = this.at(facet);
+        const least = COUNTING_FACETS[facet.localName ?? ''];
+        if (least !== undefined && !(/^\s*\+?[0-9]+\s*$/.test(value) && Number(value) >= least)) {
+          const expected = least === 0 ? 'a non-negative integer' : 'a positive integer';
+          this.problems.error('invalid-facet', `${facet.localName} needs ${expected}, not "${value}"`, facetAt);
+          continue;
+        }
         switch (facet.localName) {
           case 'enumeration':
             values.push(value);
