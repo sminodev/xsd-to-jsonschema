@@ -9,11 +9,11 @@ export interface ConvertOptions {
    * time zone in date-times); `pattern` writes the XML Schema format, where the time zone is optional.
    * Default: `format`.
    */
-  dateTime?: 'format' | 'pattern';
+  dateTime?: 'format' | 'pattern' | undefined;
   /** Add the `xml` annotations (namespace, attribute, text). Default: true. */
-  xml?: boolean;
+  xml?: boolean | undefined;
   /** The property that holds the text of an element with simple content. Default: `value`. */
-  textProperty?: string;
+  textProperty?: string | undefined;
 }
 
 export interface ConvertInput {
@@ -26,8 +26,8 @@ export interface ConvertInput {
    * The root element: `name`, `prefix:name` (with a prefix of the entry document) or `{namespace}name`. May be left
    * out if the entry declares only one global element.
    */
-  root?: string;
-  options?: ConvertOptions;
+  root?: string | undefined;
+  options?: ConvertOptions | undefined;
 }
 
 export interface ConvertResult {
