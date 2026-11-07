@@ -1,5 +1,5 @@
 import { DOMParser, type Element, type Node } from '@xmldom/xmldom';
-import type { At, Problems } from './problems.js';
+import { type At, messageOf, type Problems } from './problems.js';
 
 export const XS = 'http://www.w3.org/2001/XMLSchema';
 const XML_NS = 'http://www.w3.org/XML/1998/namespace';
@@ -30,8 +30,6 @@ export interface Component {
 export type SchemaSource = Readonly<Record<string, string>> | ((path: string) => string | undefined);
 
 const isElement = (node: Node): node is Element => node.nodeType === 1;
-
-const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /** The XML Schema element children of a node, without annotations. */
 export function xsChildren(node: Node): Element[] {
@@ -124,6 +122,8 @@ export class SchemaDocument {
 export class SchemaSet {
   /** null while a document is being loaded or if it could not be loaded */
   readonly documents = new Map<string, SchemaDocument | null>();
+  /** the document of each loaded root element, to find the file of a node */
+  private readonly byRoot = new Map<Element, SchemaDocument>();
   readonly components: Record<ComponentKind, Map<string, Component>> = {
     element: new Map(),
     attribute: new Map(),
@@ -179,6 +179,7 @@ export class SchemaSet {
     }
     const doc = new SchemaDocument(path, root);
     this.documents.set(path, doc);
+    this.byRoot.set(root, doc);
     for (const child of xsChildren(root)) {
       const at = { file: path, node: child };
       const name = attr(child, 'name');
@@ -231,10 +232,7 @@ export class SchemaSet {
     const ns =
       prefix === null ? node.lookupNamespaceURI('') || node.lookupNamespaceURI(null) : node.lookupNamespaceURI(prefix);
     if (prefix !== null && !ns) {
-      this.problems.error('unknown-prefix', `prefix ${prefix} of ${qname} is not declared`, {
-        file: this.pathOf(node),
-        node,
-      });
+      this.problems.error('unknown-prefix', `prefix ${prefix} of ${qname} is not declared`, this.at(node));
     }
     return { ns: ns || '', local };
   }
@@ -243,14 +241,14 @@ export class SchemaSet {
     return this.components[kind].get(clark(name.ns, name.local));
   }
 
+  /** The place of a node for a problem: its file, line and column. */
+  at(node: Node): At {
+    return { file: this.pathOf(node), node };
+  }
+
   /** The path of the document a node belongs to. */
   pathOf(node: Node): string | undefined {
     const root = node.ownerDocument?.documentElement;
-    for (const doc of this.documents.values()) {
-      if (doc && doc.root === root) {
-        return doc.path;
-      }
-    }
-    return undefined;
+    return root ? this.byRoot.get(root)?.path : undefined;
   }
 }

@@ -112,25 +112,63 @@ can and tells you about each case in `problems`:
 - A `warning` means the schema is a bit more permissive than the XML Schema: it accepts some values the XML Schema
   would reject.
 
-Every problem has a stable `code`, the `file` and, where known, the `line` and `column`.
+Every problem has a stable `code`, the `file` and, where known, the `line` and `column`. The tables list every code
+the converter reports.
 
-| Code                                                                                                                                                                                  | Severity        | What happened                                                                               |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------- |
-| `approximated-total-digits`                                                                                                                                                           | warning         | `totalDigits` on a decimal is only checked as a bound                                       |
-| `lexical-pattern`                                                                                                                                                                     | warning         | a pattern on a number or boolean; it restricts the XML text, so JSON values ignore it       |
-| `unsupported-bound`                                                                                                                                                                   | warning         | a minimum or maximum on a date or time type                                                 |
-| `unreachable-enumeration`                                                                                                                                                             | warning         | an enumeration value that another facet rules out; it is dropped                            |
-| `unsupported-any`                                                                                                                                                                     | error / warning | `xs:any` (error) or `xs:anyAttribute` (warning); other elements and attributes are rejected |
-| `unsupported-list`, `unsupported-union`                                                                                                                                               | error           | `xs:list` and `xs:union` are written as plain strings                                       |
-| `unsupported-mixed`                                                                                                                                                                   | error           | mixed content; the text between elements is dropped                                         |
-| `repeated-group`                                                                                                                                                                      | error           | a sequence or choice with `maxOccurs` > 1 is written as if it occurred once                 |
-| `unsupported-optional-group`, `unsupported-simple-content`, `unsupported-element`, `unsupported-redefine`, `unsupported-include`, `unsupported-facet`, `unsupported-value`            | error           | other constructs that JSON Schema can't express                                             |
-| `untranslatable-pattern`                                                                                                                                                              | error           | a pattern with a block escape such as `\p{IsBasicLatin}`; it is dropped                     |
-| `ambiguous-choice`                                                                                                                                                                    | error           | a choice where more than one branch can be empty                                            |
-| `duplicate-name`                                                                                                                                                                      | error           | the same name twice in one object                                                           |
-| `unknown-type`, `unknown-element`, `unknown-attribute`, `unknown-group`, `unknown-prefix`, `circular-type`, `circular-group`, `invalid-facet`, `invalid-value`, `duplicate-component` | error           | a mistake in the XML Schema itself                                                          |
-| `missing-file`, `invalid-xml`, `not-a-schema`                                                                                                                                         | error           | a schema file is missing or unreadable, is no XML, or is no XML Schema                      |
-| `root-required`, `unknown-root`                                                                                                                                                       | error           | no root element given where one is needed, or no such element                               |
+### Warnings: the schema accepts more
+
+| Code                        | What happened                                                                     |
+| --------------------------- | --------------------------------------------------------------------------------- |
+| `approximated-total-digits` | `totalDigits` on a decimal is only checked as a bound                             |
+| `lexical-pattern`           | a pattern on a number or boolean restricts the XML text, so JSON values ignore it |
+| `unreachable-enumeration`   | an enumeration value that another facet rules out; it is dropped                  |
+| `unsupported-bound`         | a minimum or maximum on a date or time type                                       |
+
+### Errors: constructs JSON Schema can't express
+
+| Code                         | What happened                                                                                 |
+| ---------------------------- | --------------------------------------------------------------------------------------------- |
+| `ambiguous-choice`           | a choice where more than one branch can be empty                                              |
+| `duplicate-name`             | the same name twice in one object, for example an attribute and an element                    |
+| `repeated-group`             | a sequence or choice with `maxOccurs` > 1 is written as if it occurred once                   |
+| `unsupported-any`            | `xs:any`, or `xs:anyAttribute` as a warning; other elements and attributes are rejected       |
+| `unsupported-element`        | `substitutionGroup`, `abstract` or `nillable` on an element                                   |
+| `unsupported-facet`          | `xs:assertion`, `xs:explicitTimezone` or an unknown facet; it is ignored                      |
+| `unsupported-include`        | an included document with another target namespace (chameleon include)                        |
+| `unsupported-list`           | `xs:list` is written as a plain string                                                        |
+| `unsupported-mixed`          | mixed content; the text between elements is dropped                                           |
+| `unsupported-optional-group` | a choice inside an optional sequence; the sequence is written as if it were required          |
+| `unsupported-particle`       | something other than an element, a group or `xs:any` inside a sequence, choice or `all`       |
+| `unsupported-redefine`       | `xs:redefine` or `xs:override` is ignored                                                     |
+| `unsupported-simple-content` | a `simpleContent` restriction, whose facets are not applied, or a base without simple content |
+| `unsupported-union`          | `xs:union` is written as a plain string                                                       |
+| `unsupported-value`          | `fixed` or `default` on an element with complex content is ignored                            |
+| `untranslatable-pattern`     | a pattern with a block escape such as `\p{IsBasicLatin}`; it is dropped                       |
+
+### Errors: mistakes in the XML Schema
+
+| Code                  | What happened                                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `circular-group`      | a group or attribute group that contains itself                                                      |
+| `circular-type`       | a type derived from itself                                                                           |
+| `duplicate-component` | two global components of the same kind with the same name                                            |
+| `invalid-facet`       | a facet value that doesn't fit, such as `maxLength="abc"`; the facet or enumeration value is dropped |
+| `invalid-value`       | a `fixed` or `default` value that doesn't fit the type                                               |
+| `unknown-attribute`   | a reference to an attribute that isn't declared                                                      |
+| `unknown-element`     | a reference to an element that isn't declared                                                        |
+| `unknown-group`       | a reference to a group or attribute group that isn't defined                                         |
+| `unknown-prefix`      | a prefix without a namespace declaration                                                             |
+| `unknown-type`        | a type or base type that isn't defined                                                               |
+
+### Errors: files and the root element
+
+| Code            | What happened                                               |
+| --------------- | ----------------------------------------------------------- |
+| `invalid-xml`   | a schema file isn't well-formed XML                         |
+| `missing-file`  | a schema file is missing or can't be read                   |
+| `not-a-schema`  | a file isn't an XML Schema document                         |
+| `root-required` | no root element given, and the entry declares more than one |
+| `unknown-root`  | the entry declares no global element with that name         |
 
 If the entry file can't be read or no root element is found, `schema` is `undefined`.
 

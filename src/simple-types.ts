@@ -146,7 +146,7 @@ export class SimpleTypes {
   ) {}
 
   private at(node: Element | undefined): At | undefined {
-    return node && { file: this.set.pathOf(node), node };
+    return node && this.set.at(node);
   }
 
   /**

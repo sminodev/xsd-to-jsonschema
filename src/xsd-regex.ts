@@ -262,7 +262,10 @@ export function translateBody(source: string): string {
   try {
     new RegExp(out, 'u');
   } catch (e) {
-    throw new XsdRegexError(`/${source}/ is no valid regular expression after translation: ${(e as Error).message}`);
+    if (!(e instanceof SyntaxError)) {
+      throw e;
+    }
+    throw new XsdRegexError(`/${source}/ is no valid regular expression after translation: ${e.message}`);
   }
   return out;
 }
@@ -275,7 +278,10 @@ export function translateBody(source: string): string {
  */
 export function combinePatterns(steps: readonly (readonly string[])[]): string {
   const alternatives = steps.map((step) => (step.length === 1 ? step[0] : step.map((b) => `(?:${b})`).join('|')));
-  const last = alternatives[alternatives.length - 1];
+  const last = alternatives.at(-1);
+  if (last === undefined) {
+    throw new RangeError('combinePatterns needs at least one step');
+  }
   const lookaheads = alternatives
     .slice(0, -1)
     .map((a) => `(?=(?:${a})$)`)

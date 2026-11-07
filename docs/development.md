@@ -22,7 +22,7 @@ schema:
 
 ```text
 convert ──► SchemaSet.load(entry) ──► find the root element ──► Emitter.root(element) ──► { schema, problems }
-              imports, includes          root option or the       types, declarations,
+              imports, includes          root option or the       declarations, objects,
               global components          only global element      content models, $defs
 ```
 
@@ -36,9 +36,11 @@ Each module has one job:
 | `src/schema-set.ts`        | parses the documents, follows `xs:import` and `xs:include` relative to the importing file, and looks up global components by `{namespace}name`, resolving prefixes with the namespaces in scope |
 | `src/simple-types.ts`      | walks a simple type down to its built-in type and merges the facets of every restriction step on the way                                                                                        |
 | `src/xsd-regex.ts`         | translates XML Schema patterns into anchored JavaScript patterns for the `u` flag                                                                                                               |
-| `src/emitter.ts`           | writes the JSON Schema: `$defs` names, element and attribute declarations, `fixed` and `default`, content models and objects                                                                    |
+| `src/emitter.ts`           | writes the JSON Schema: element and attribute declarations, `fixed` and `default`, and the objects of complex types                                                                             |
+| `src/content-model.ts`     | turns sequences, choices, `all` and group references into the properties and constraints of one object                                                                                          |
+| `src/definitions.ts`       | names the entries in `$defs` and builds them in the order of first use                                                                                                                          |
 | `src/json-schema.ts`       | the types of the JSON Schema it writes                                                                                                                                                          |
-| `src/problems.ts`          | collects the problems with code, severity, file and line                                                                                                                                        |
+| `src/problems.ts`          | the list of problem codes, and collecting the problems with code, severity, file and line                                                                                                       |
 | `src/cli.ts`, `src/bin.ts` | the command line; `bin.ts` only calls `run()` from `cli.ts`, which the tests call directly                                                                                                      |
 
 A few things about the emitter are worth knowing before you change it:
@@ -61,6 +63,7 @@ in `dist/`.
 | `src/xsd-regex.test.ts`    | translating XML Schema patterns                                                |
 | `src/schema-set.test.ts`   | loading documents, paths, QNames and documentation                             |
 | `src/simple-types.test.ts` | built-in types, merged facets, enumerations and number bounds                  |
+| `src/problems.test.ts`     | that docs/output.md explains every problem code, and that each one is used     |
 | `src/convert.test.ts`      | the API, choosing the root, `$defs` names, options, values and problems        |
 | `src/cli.test.ts`          | `convertFile` and the command line, on files in a temporary directory          |
 | `src/index.test.ts`        | that the main entry point needs no Node.js built-ins                           |
@@ -81,6 +84,6 @@ leading zeros, so the cases stay away from those.
 
 1. Add a case to `src/differential.test.ts` with documents the XML Schema accepts and documents it rejects.
 2. Implement the feature, usually in `src/emitter.ts` or `src/simple-types.ts`.
-3. If JSON Schema can only express part of it, report a problem with a new code and add the code to
-   [output.md](output.md#problems).
+3. If JSON Schema can only express part of it, report a problem with a new code. Add the code to `PROBLEM_CODES` in
+   `src/problems.ts` and explain it in [output.md](output.md#problems); `src/problems.test.ts` checks both.
 4. Describe the output in [output.md](output.md) and add a line to the changelog.
