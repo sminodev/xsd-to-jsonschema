@@ -235,4 +235,4 @@ UPDATE_EXAMPLES=1 npm test   # updates order.schema.json and order.json after an
 
 ## License
 
-Not decided yet.
+[MIT](LICENSE)

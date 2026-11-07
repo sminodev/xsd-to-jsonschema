@@ -63,5 +63,6 @@
   },
   "bin": {
     "xsd-to-jsonschema": "dist/bin.js"
-  }
+  },
+  "license": "MIT"
 }
