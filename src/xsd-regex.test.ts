@@ -56,5 +56,6 @@ describe('XML Schema patterns', () => {
     );
     expect(['AB', '912'].every((v) => re.test(v))).toBe(true);
     expect(['BA', '9X', 'A1'].some((v) => re.test(v))).toBe(false);
+    expect(() => combinePatterns([])).toThrow(RangeError);
   });
 });

@@ -1,6 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { convertFile } from './node.js';
+import { messageOf } from './problems.js';
 
 export const USAGE = `Usage: xsd-to-jsonschema <entry.xsd> [options]
 
@@ -30,8 +31,6 @@ export interface Io {
   stderr(text: string): void;
   writeFile(path: string, text: string): void;
 }
-
-const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 const processIo: Io = {
   stdout: (text) => process.stdout.write(text),
