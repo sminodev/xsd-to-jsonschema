@@ -10,7 +10,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "coverage": "vitest run --coverage",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "example": "npm run build && node dist/bin.js examples/order/order.xsd"
   },
   "keywords": [
     "xsd",
@@ -45,7 +46,9 @@
     "node": ">=22.12"
   },
   "files": [
-    "dist"
+    "dist",
+    "docs",
+    "CHANGELOG.md"
   ],
   "exports": {
     ".": {

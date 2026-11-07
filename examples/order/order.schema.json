@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "An order with its lines.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0",
+      "xml": {
+        "attribute": true
+      }
+    },
+    "Title": {
+      "$ref": "#/$defs/Text40",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "CustomerRef": {
+      "type": "string",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "Express": {
+      "type": "boolean",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "Level": {
+      "$ref": "#/$defs/ServiceLevel",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "Pickup": {
+      "description": "The customer collects the order.",
+      "type": "boolean",
+      "const": true,
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "DeliveryDate": {
+      "type": "string",
+      "format": "date",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "DeliveryTime": {
+      "type": "string",
+      "format": "time",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "Packages": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 99,
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "Notes": {
+      "type": "string",
+      "maxLength": 500,
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "Contact": {
+      "$ref": "#/$defs/Contact",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "Line": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Line"
+      },
+      "minItems": 1,
+      "maxItems": 5,
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "Attachment": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    }
+  },
+  "required": [
+    "Title",
+    "Express",
+    "Line"
+  ],
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "required": [
+        "Pickup"
+      ],
+      "properties": {
+        "DeliveryDate": false,
+        "DeliveryTime": false
+      }
+    },
+    {
+      "required": [
+        "DeliveryDate"
+      ],
+      "properties": {
+        "Pickup": false
+      }
+    }
+  ],
+  "xml": {
+    "name": "Order",
+    "namespace": "urn:example:order"
+  },
+  "$defs": {
+    "Text40": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40
+    },
+    "ServiceLevel": {
+      "type": "integer",
+      "enum": [
+        0,
+        1,
+        2
+      ]
+    },
+    "Contact": {
+      "type": "object",
+      "properties": {
+        "Email": {
+          "$ref": "#/$defs/Email",
+          "xml": {
+            "namespace": "urn:example:common"
+          }
+        },
+        "Phone": {
+          "type": "string",
+          "xml": {
+            "namespace": "urn:example:common"
+          }
+        }
+      },
+      "required": [
+        "Email"
+      ],
+      "additionalProperties": false
+    },
+    "Line": {
+      "type": "object",
+      "properties": {
+        "Item": {
+          "$ref": "#/$defs/Text40",
+          "xml": {
+            "namespace": "urn:example:order"
+          }
+        },
+        "Quantity": {
+          "type": "integer",
+          "minimum": 1,
+          "xml": {
+            "namespace": "urn:example:order"
+          }
+        },
+        "Tag": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 3,
+          "xml": {
+            "namespace": "urn:example:order"
+          }
+        },
+        "Packaging": {
+          "type": "object",
+          "properties": {
+            "Box": {
+              "$ref": "#/$defs/BoxSize",
+              "xml": {
+                "namespace": "urn:example:order"
+              }
+            },
+            "Weight": {
+              "$ref": "#/$defs/Kilogram",
+              "xml": {
+                "namespace": "urn:example:order"
+              }
+            }
+          },
+          "required": [
+            "Box"
+          ],
+          "additionalProperties": false,
+          "xml": {
+            "namespace": "urn:example:order"
+          }
+        }
+      },
+      "required": [
+        "Item",
+        "Quantity"
+      ],
+      "additionalProperties": false
+    },
+    "Email": {
+      "type": "string",
+      "pattern": "^(?:[^@ ]+@[^@ ]+)$"
+    },
+    "BoxSize": {
+      "type": "string",
+      "enum": [
+        "S",
+        "M",
+        "L"
+      ]
+    },
+    "Kilogram": {
+      "type": "number",
+      "multipleOf": 0.01,
+      "exclusiveMinimum": 0
+    }
+  }
+}
