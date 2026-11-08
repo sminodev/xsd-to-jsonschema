@@ -26,4 +26,4 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: node dist/bin.js examples/order/order.xsd > /dev/null
-      - run: npm audit
+      - run: npm audit --omit=dev

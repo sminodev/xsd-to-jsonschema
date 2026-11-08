@@ -3,7 +3,7 @@
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            xmlns="urn:example:order" xmlns:c="urn:example:common"
            targetNamespace="urn:example:order" elementFormDefault="qualified">
-  <xs:import namespace="urn:example:common" schemaLocation="common.xsd"/>
+  <xs:import namespace="urn:example:common" schemaLocation="common/common.xsd"/>
   <xs:include schemaLocation="line.xsd"/>
 
   <xs:element name="Order">
@@ -22,11 +22,9 @@
               <xs:documentation>The customer collects the order.</xs:documentation>
             </xs:annotation>
           </xs:element>
-          <xs:sequence>
-            <xs:element name="DeliveryDate" type="xs:date"/>
-            <xs:element name="DeliveryTime" type="xs:time" minOccurs="0"/>
-          </xs:sequence>
+          <xs:group ref="Delivery"/>
         </xs:choice>
+        <xs:element name="Wanted" type="PartialDate" minOccurs="0"/>
         <xs:element name="Packages" minOccurs="0">
           <xs:simpleType>
             <xs:restriction base="xs:integer">
@@ -35,18 +33,54 @@
             </xs:restriction>
           </xs:simpleType>
         </xs:element>
-        <xs:element name="Notes" minOccurs="0">
-          <xs:simpleType>
-            <xs:restriction base="xs:string">
-              <xs:maxLength value="500"/>
-            </xs:restriction>
-          </xs:simpleType>
-        </xs:element>
+        <xs:element ref="c:Note" minOccurs="0"/>
+        <xs:sequence minOccurs="0">
+          <xs:element name="DiscountCode" type="xs:token"/>
+          <xs:element name="DiscountPercent" type="c:Percent"/>
+        </xs:sequence>
         <xs:element name="Contact" type="c:Contact" minOccurs="0"/>
         <xs:element name="Line" type="Line" maxOccurs="5"/>
         <xs:element name="Attachment" type="xs:base64Binary" minOccurs="0"/>
+        <xs:element name="Extensions" minOccurs="0">
+          <xs:annotation>
+            <xs:documentation>Data of other systems, in their own namespaces.</xs:documentation>
+          </xs:annotation>
+          <xs:complexType>
+            <xs:sequence>
+              <xs:any namespace="##other" processContents="lax" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
       </xs:sequence>
       <xs:attribute name="version" type="xs:string" fixed="1.0"/>
+      <xs:attributeGroup ref="Tracking"/>
     </xs:complexType>
   </xs:element>
+
+  <xs:group name="Delivery">
+    <xs:sequence>
+      <xs:element name="DeliveryDate" type="xs:date"/>
+      <xs:element name="DeliveryTime" type="xs:time" minOccurs="0"/>
+    </xs:sequence>
+  </xs:group>
+
+  <xs:attributeGroup name="Tracking">
+    <xs:attribute name="created" type="xs:dateTime" use="required"/>
+    <xs:attribute name="channel" type="Channel" default="web"/>
+  </xs:attributeGroup>
+
+  <xs:simpleType name="Channel">
+    <xs:restriction base="xs:token">
+      <xs:enumeration value="web"/>
+      <xs:enumeration value="phone"/>
+      <xs:enumeration value="mail"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="PartialDate">
+    <xs:annotation>
+      <xs:documentation>A month or a day.</xs:documentation>
+    </xs:annotation>
+    <xs:union memberTypes="xs:gYearMonth xs:date"/>
+  </xs:simpleType>
 </xs:schema>

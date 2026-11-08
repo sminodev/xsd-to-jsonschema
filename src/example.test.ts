@@ -27,7 +27,7 @@ describe('the order example', () => {
     };
     const extraLines = '<Line><Item>x</Item><Quantity>1</Quantity></Line>'.repeat(4);
     const result = await compare({
-      files: Object.fromEntries(['order.xsd', 'line.xsd', 'common.xsd'].map((name) => [name, read(name)])),
+      files: Object.fromEntries(['order.xsd', 'line.xsd', 'common/common.xsd'].map((name) => [name, read(name)])),
       entry: 'order.xsd',
       instances: {
         order,
@@ -40,9 +40,25 @@ describe('the order example', () => {
         zeroWeight: variant('<Weight>2.5</Weight>', '<Weight>0</Weight>'),
         bigBox: variant('<Box>M</Box>', '<Box>XL</Box>'),
         otherVersion: variant('common" version="1.0"', 'common" version="2.0"'),
+        notCreated: variant(' created="2026-11-04T09:30:00"', ''),
+        byPhone: variant('version="1.0" created', 'version="1.0" channel="phone" created'),
+        byFax: variant('version="1.0" created', 'version="1.0" channel="fax" created'),
+        wantedDay: variant('<Wanted>2026-11</Wanted>', '<Wanted>2026-11-30</Wanted>'),
+        wantedBadMonth: variant('<Wanted>2026-11</Wanted>', '<Wanted>2026-13</Wanted>'),
+        discountWithoutPercent: variant('<DiscountPercent>10</DiscountPercent>', ''),
+        tooMuchDiscount: variant('<DiscountPercent>10</DiscountPercent>', '<DiscountPercent>100.5</DiscountPercent>'),
+        noDiscount: variant('<DiscountCode>AUTUMN</DiscountCode>\n  <DiscountPercent>10</DiscountPercent>', ''),
+        priceWithoutCurrency: variant('<Price currency="EUR">', '<Price>'),
+        priceInCents: variant('<Price currency="EUR">4.99</Price>', '<Price currency="eur">499</Price>'),
+        noContactName: variant('<c:Name>Paper Shop</c:Name>', ''),
+        plainNote: variant('Please ring <c:b>twice</c:b>.', 'Please ring twice.'),
+        extension: variant('</Order>', '<Extensions><x:Mark xmlns:x="urn:example:x">1</x:Mark></Extensions></Order>'),
       },
     });
-    expect(result.problems).toEqual([]);
+    expect(result.problems.map((p) => `${p.severity}:${p.code}`)).toEqual([
+      'warning:unsupported-any',
+      'warning:unsupported-mixed',
+    ]);
     expect(Object.fromEntries(result.verdicts.map((v) => [v.name, v.xsd]))).toEqual({
       order: true,
       pickupAndDelivery: false,
@@ -54,6 +70,19 @@ describe('the order example', () => {
       zeroWeight: false,
       bigBox: false,
       otherVersion: false,
+      notCreated: false,
+      byPhone: true,
+      byFax: false,
+      wantedDay: true,
+      wantedBadMonth: false,
+      discountWithoutPercent: false,
+      tooMuchDiscount: false,
+      noDiscount: true,
+      priceWithoutCurrency: false,
+      priceInCents: false,
+      noContactName: false,
+      plainNote: true,
+      extension: true,
     });
     expect(disagreements(result.verdicts)).toEqual([]);
     golden('order.schema.json', result.schema);

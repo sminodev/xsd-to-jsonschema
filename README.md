@@ -18,22 +18,24 @@ ES modules that way.
 
 ## Example: a multi-file order schema
 
-[`examples/order`](examples/order) splits an order schema over three files:
+[`examples/order`](examples/order) splits an order schema over three files in two folders:
 
 ```text
 examples/order/
-├── order.xsd          root element Order, namespace urn:example:order
-├── line.xsd           type Line, included into order.xsd (same namespace)
-├── common.xsd         types of urn:example:common, imported by order.xsd and line.xsd
-├── order.xml          a sample order
-├── order.schema.json  the generated JSON Schema
-└── order.json         the same order as JSON
+├── order.xsd            root element Order, namespace urn:example:order
+├── line.xsd             type Line, included into order.xsd (same namespace)
+├── common/common.xsd    types of urn:example:common, imported by order.xsd and line.xsd
+├── order.xml            a sample order
+├── order.schema.json    the generated JSON Schema
+└── order.json           the same order as JSON
 ```
 
-The schema is small, but it nests four levels deep (`Order` → `Line` → `Packaging` → `Weight`) and uses what real
-schemas use: a choice between `Pickup` and a delivery date, a contact type from another namespace, repeated
-elements, enumerations, a pattern, a fixed attribute and decimal places. In a clone of this repository, this builds
-the package and prints the schema:
+The schema is small, but it uses what enterprise schemas use: a choice between `Pickup` and a delivery group, an
+attribute group, a type that extends another one, an amount whose currency is an attribute, a contact from another
+namespace, an optional sequence, a union of a month and a day, a note with mixed content, an extension point for data
+of other systems, repeated elements, enumerations, patterns, fixed and default values and decimal places. It nests
+four levels deep (`Order` → `Line` → `Packaging` → `Weight`). In a clone of this repository, this builds the package
+and prints the schema:
 
 ```sh
 npm run example
@@ -50,6 +52,7 @@ only one global element. Here is part of the result (the full file is
   "type": "object",
   "properties": {
     "version": { "type": "string", "const": "1.0", "xml": { "attribute": true } },
+    "channel": { "$ref": "#/$defs/Channel", "default": "web", "xml": { "attribute": true } },
     "Title": { "$ref": "#/$defs/Text40", "xml": { "namespace": "urn:example:order" } },
     "Express": { "type": "boolean", "xml": { "namespace": "urn:example:order" } },
     "Pickup": {
@@ -58,6 +61,14 @@ only one global element. Here is part of the result (the full file is
       "const": true,
       "xml": { "namespace": "urn:example:order" }
     },
+    "Wanted": { "$ref": "#/$defs/PartialDate", "xml": { "namespace": "urn:example:order" } },
+    "Note": {
+      "description": "Free text that may mark words as bold or italic.",
+      "$ref": "#/$defs/Note",
+      "xml": { "namespace": "urn:example:common" }
+    },
+    "DiscountCode": { "type": "string", "xml": { "namespace": "urn:example:order" } },
+    "DiscountPercent": { "$ref": "#/$defs/Percent", "xml": { "namespace": "urn:example:order" } },
     "Contact": { "$ref": "#/$defs/Contact", "xml": { "namespace": "urn:example:order" } },
     "Line": {
       "type": "array",
@@ -65,36 +76,63 @@ only one global element. Here is part of the result (the full file is
       "minItems": 1,
       "maxItems": 5,
       "xml": { "namespace": "urn:example:order" }
+    },
+    "Extensions": {
+      "description": "Data of other systems, in their own namespaces.",
+      "type": "object",
+      "xml": { "namespace": "urn:example:order" }
     }
   },
-  "required": ["Title", "Express", "Line"],
+  "required": ["created", "Title", "Express", "Line"],
   "additionalProperties": false,
+  "dependentRequired": { "DiscountCode": ["DiscountPercent"], "DiscountPercent": ["DiscountCode"] },
   "oneOf": [
     { "required": ["Pickup"], "properties": { "DeliveryDate": false, "DeliveryTime": false } },
     { "required": ["DeliveryDate"], "properties": { "Pickup": false } }
   ],
   "xml": { "name": "Order", "namespace": "urn:example:order" },
   "$defs": {
-    "Text40": { "type": "string", "minLength": 1, "maxLength": 40 },
+    "Note": {
+      "type": "object",
+      "properties": { "value": { "type": "string", "xml": { "text": true, "mixed": true } } },
+      "required": ["value"],
+      "additionalProperties": false
+    },
+    "Percent": { "type": "number", "multipleOf": 0.1, "minimum": 0, "maximum": 100 },
     "Contact": {
       "type": "object",
       "properties": {
+        "Name": { "$ref": "#/$defs/Text40", "xml": { "namespace": "urn:example:common" } },
         "Email": { "$ref": "#/$defs/Email", "xml": { "namespace": "urn:example:common" } },
         "Phone": { "type": "string", "xml": { "namespace": "urn:example:common" } }
       },
-      "required": ["Email"],
+      "required": ["Name", "Email"],
       "additionalProperties": false
     },
-    "Email": { "type": "string", "pattern": "^(?:[^@ ]+@[^@ ]+)$" },
+    "Price": {
+      "description": "An amount that always says its currency.",
+      "type": "object",
+      "properties": {
+        "currency": { "$ref": "#/$defs/Currency", "xml": { "attribute": true } },
+        "value": { "type": "number", "xml": { "text": true } }
+      },
+      "required": ["currency", "value"],
+      "additionalProperties": false
+    },
     "Kilogram": { "type": "number", "multipleOf": 0.01, "exclusiveMinimum": 0 }
   }
 }
 ```
 
-The excerpt skips `CustomerRef`, `Level`, `Packages`, `Notes`, `Attachment`, the definitions `Line`,
-`ServiceLevel` and `BoxSize`, and `DeliveryDate` and `DeliveryTime`, whose patterns for the XML Schema date and time
-formats are long. Two things to note: the properties keep the order of the XML Schema, and the `oneOf`
-keeps `Pickup` and the delivery date apart, so an order can have one or the other, but not both.
+The excerpt leaves out the attribute `created`, the elements `CustomerRef`, `Level`, `DeliveryDate`, `DeliveryTime`,
+`Packages` and `Attachment`, and most definitions; the patterns for dates and times are long. A few things to note:
+
+- The properties keep the order of the XML Schema, attributes first.
+- The `oneOf` keeps `Pickup` and the delivery date apart, so an order has one or the other, but not both.
+- `dependentRequired` says that `DiscountCode` and `DiscountPercent` come together or not at all.
+- `Contact` has the `Name` of the type it extends; `Price` requires the `currency` that is optional in `Amount`.
+- `Note` keeps its markup as a string, and `Extensions` accepts any content (`xs:any`). Both are reported as warnings
+  in `problems`, since the JSON Schema doesn't check what's inside.
 
 Here is `order.xml` next to its JSON form:
 
@@ -103,20 +141,24 @@ Here is `order.xml` next to its JSON form:
 <tr><td>
 
 ```xml
-<Order xmlns="urn:example:order"
-       xmlns:c="urn:example:common"
-       version="1.0">
+<Order xmlns="urn:example:order" xmlns:c="urn:example:common" version="1.0" created="2026-11-04T09:30:00">
   <Title>Order 1</Title>
   <CustomerRef>C-7</CustomerRef>
   <Express>false</Express>
   <Level>0</Level>
   <DeliveryDate>2026-11-20</DeliveryDate>
+  <Wanted>2026-11</Wanted>
+  <c:Note>Please ring <c:b>twice</c:b>.</c:Note>
+  <DiscountCode>AUTUMN</DiscountCode>
+  <DiscountPercent>10</DiscountPercent>
   <Contact>
+    <c:Name>Paper Shop</c:Name>
     <c:Email>orders@example.com</c:Email>
   </Contact>
   <Line>
     <Item>Paper</Item>
     <Quantity>2</Quantity>
+    <Price currency="EUR">4.99</Price>
     <Tag>A4</Tag>
     <Packaging>
       <Box>M</Box>
@@ -135,23 +177,24 @@ Here is `order.xml` next to its JSON form:
 ```json
 {
   "version": "1.0",
+  "created": "2026-11-04T09:30:00",
   "Title": "Order 1",
   "CustomerRef": "C-7",
   "Express": false,
   "Level": 0,
   "DeliveryDate": "2026-11-20",
-  "Contact": {
-    "Email": "orders@example.com"
-  },
+  "Wanted": "2026-11",
+  "Note": { "value": "Please ring <c:b>twice</c:b>." },
+  "DiscountCode": "AUTUMN",
+  "DiscountPercent": 10,
+  "Contact": { "Name": "Paper Shop", "Email": "orders@example.com" },
   "Line": [
     {
       "Item": "Paper",
       "Quantity": 2,
+      "Price": { "currency": "EUR", "value": 4.99 },
       "Tag": ["A4"],
-      "Packaging": {
-        "Box": "M",
-        "Weight": 2.5
-      }
+      "Packaging": { "Box": "M", "Weight": 2.5 }
     },
     { "Item": "Pens", "Quantity": 10 }
   ]
@@ -181,7 +224,7 @@ too:
 import { convert } from 'xsd-to-jsonschema';
 
 const { schema, problems } = convert({
-  files: { 'order.xsd': orderXsd, 'line.xsd': lineXsd, 'common.xsd': commonXsd },
+  files: { 'order.xsd': orderXsd, 'line.xsd': lineXsd, 'common/common.xsd': commonXsd },
   entry: 'order.xsd',
 });
 ```
@@ -244,7 +287,8 @@ npm run example              # builds and prints the schema for examples/order
 UPDATE_EXAMPLES=1 npm test   # updates order.schema.json and order.json after an intended change
 ```
 
-[docs/development.md](docs/development.md) explains how the converter and its tests work.
+[docs/development.md](docs/development.md) explains how the converter and its tests work, and
+[CONTRIBUTING.md](CONTRIBUTING.md) what a pull request needs.
 
 ## License
 
