@@ -167,15 +167,16 @@ export class SchemaSet {
       return this.documents.get(path) ?? undefined;
     }
     this.documents.set(path, null);
+    const at = { ...from, file: from?.file ?? path };
     let text: string | undefined;
     try {
       text = this.read(path);
     } catch (e) {
-      this.problems.error('missing-file', `schema document ${path} could not be read: ${messageOf(e)}`, from);
+      this.problems.error('missing-file', `schema document ${path} could not be read: ${messageOf(e)}`, at);
       return undefined;
     }
     if (text === undefined || text === null) {
-      this.problems.error('missing-file', `schema document ${path} not found`, from);
+      this.problems.error('missing-file', `schema document ${path} not found`, at);
       return undefined;
     }
     let root: Element | null;

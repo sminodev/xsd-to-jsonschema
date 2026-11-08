@@ -1,11 +1,10 @@
 # Contributing
 
-Thanks for helping. [docs/development.md](docs/development.md) has everything you need: the setup, how the converter
-works, how to find out why a schema looks wrong, and how to add support for another XML Schema feature.
+The [development guide](docs/development.md) covers setup, code structure and debugging.
 
-In short:
-
-- You need Node.js 22.12 or later. `npm ci` installs everything, `npm test` runs the tests.
-- Every change comes with a test that fails without it; see [Pull requests](docs/development.md#pull-requests).
-- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org). `feat:` and `fix:` messages
-  end up in the changelog.
+- Use Node.js 22.12 or later. `npm ci` installs the dependencies; `npm test` runs the tests.
+- Keep pull requests focused and include a regression test for behavior changes. Update the
+  [output documentation](docs/output.md) when a mapping changes.
+- Run the checks listed under [Pull requests](docs/development.md#pull-requests) before submitting a change.
+- Use [Conventional Commits](https://www.conventionalcommits.org) and record user-facing changes in the unreleased
+  section of [CHANGELOG.md](CHANGELOG.md).

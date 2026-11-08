@@ -68,7 +68,7 @@ describe('SimpleTypes', () => {
     expect(t.schema('Count')).toEqual({ type: 'integer', exclusiveMinimum: 0, maximum: 99 });
   });
 
-  it('turns fractionDigits into multipleOf and totalDigits into bounds', () => {
+  it('turns fractionDigits into multipleOf and finite decimal digit limits into alternatives', () => {
     const t = types(
       restriction('Amount', 'xs:decimal', '<xs:fractionDigits value="2"/>') +
         restriction('Whole', 'xs:decimal', '<xs:fractionDigits value="0"/><xs:totalDigits value="3"/>') +
@@ -80,10 +80,89 @@ describe('SimpleTypes', () => {
     expect(t.schema('Money')).toEqual({
       type: 'number',
       multipleOf: 0.01,
+      anyOf: [
+        { multipleOf: 1, exclusiveMinimum: -1000000, exclusiveMaximum: 1000000 },
+        { multipleOf: 0.1, exclusiveMinimum: -100000, exclusiveMaximum: 100000 },
+        { multipleOf: 0.01, exclusiveMinimum: -10000, exclusiveMaximum: 10000 },
+      ],
       exclusiveMinimum: -1000000,
       exclusiveMaximum: 1000000,
     });
+    expect(t.codes()).toEqual([]);
+  });
+
+  it('reports the remaining approximation when totalDigits has no fractionDigits limit', () => {
+    const t = types(restriction('Amount', 'xs:decimal', '<xs:totalDigits value="6"/>'));
+    expect(t.schema('Amount')).toEqual({ type: 'number', exclusiveMinimum: -1000000, exclusiveMaximum: 1000000 });
     expect(t.codes()).toEqual(['approximated-total-digits']);
+  });
+
+  it('filters inherited enumeration values using exact decimal digit limits', () => {
+    const t = types(
+      restriction(
+        'Base',
+        'xs:decimal',
+        '<xs:totalDigits value="8"/><xs:fractionDigits value="4"/>' +
+          '<xs:enumeration value="999999"/><xs:enumeration value="999999.5"/><xs:enumeration value="9999.99"/>',
+      ) + restriction('Amount', 'Base', '<xs:totalDigits value="6"/><xs:fractionDigits value="2"/>'),
+    );
+    expect(t.schema('Amount')).toEqual({ type: 'number', enum: [999999, 9999.99] });
+    expect(t.codes()).toEqual(['unreachable-enumeration']);
+  });
+
+  it('checks union enumeration values against the member types', () => {
+    const t = types(
+      restriction('Small', 'xs:integer', '<xs:maxInclusive value="5"/>') +
+        '<xs:simpleType name="Numeric"><xs:union memberTypes="Small xs:byte"/></xs:simpleType>' +
+        restriction('Narrow', 'Numeric', '<xs:enumeration value="4"/><xs:enumeration value="128"/>'),
+    );
+    expect(t.schema('Narrow')).toEqual({ type: 'integer', enum: [4] });
+    expect(t.codes()).toEqual(['unreachable-enumeration']);
+  });
+
+  it('checks union enumeration values against exact decimal alternatives', () => {
+    const t = types(
+      restriction('Amount', 'xs:decimal', '<xs:totalDigits value="6"/><xs:fractionDigits value="2"/>') +
+        '<xs:simpleType name="Numeric"><xs:union memberTypes="Amount xs:negativeInteger"/></xs:simpleType>' +
+        restriction(
+          'Narrow',
+          'Numeric',
+          '<xs:enumeration value="999999"/><xs:enumeration value="9999.99"/><xs:enumeration value="999999.5"/>',
+        ),
+    );
+    expect(t.schema('Narrow')).toEqual({ type: 'number', enum: [999999, 9999.99] });
+    expect(t.codes()).toEqual(['unreachable-enumeration']);
+  });
+
+  it.each([
+    {
+      label: 'underflowing fractionDigits',
+      facets: '<xs:fractionDigits value="324"/>',
+      expected: { type: 'number' },
+      codes: ['unsupported-facet'],
+    },
+    {
+      label: 'overflowing totalDigits',
+      facets: '<xs:totalDigits value="309"/>',
+      expected: { type: 'number' },
+      codes: ['unsupported-facet'],
+    },
+    {
+      label: 'both unrepresentable digit facets',
+      facets: '<xs:totalDigits value="324"/><xs:fractionDigits value="324"/>',
+      expected: { type: 'number' },
+      codes: ['unsupported-facet', 'unsupported-facet'],
+    },
+    {
+      label: 'an unrepresentable scale with a representable bound',
+      facets: '<xs:totalDigits value="6"/><xs:fractionDigits value="324"/>',
+      expected: { type: 'number', exclusiveMinimum: -1000000, exclusiveMaximum: 1000000 },
+      codes: ['unsupported-facet', 'approximated-total-digits'],
+    },
+  ])('reports $label without writing invalid numeric constraints', ({ facets, expected, codes }) => {
+    const t = types(restriction('Amount', 'xs:decimal', facets));
+    expect(t.schema('Amount')).toEqual(expected);
+    expect(t.codes()).toEqual(codes);
   });
 
   it('gives enumeration values their JSON type and drops values other facets rule out', () => {
@@ -138,6 +217,7 @@ describe('lexicalToJson', () => {
   it('converts lexical values to the JSON type', () => {
     expect(lexicalToJson('integer', ' 7 ')).toEqual({ value: 7 });
     expect(lexicalToJson('number', '1.50')).toEqual({ value: 1.5 });
+    expect(lexicalToJson('number', '1e999')).toHaveProperty('error');
     expect(lexicalToJson('integer', '1.5')).toEqual({ error: '1.5 is no integer' });
     expect(lexicalToJson('boolean', '1')).toEqual({ value: true });
     expect(lexicalToJson('boolean', 'yes')).toEqual({ error: 'yes is no boolean' });

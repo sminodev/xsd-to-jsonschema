@@ -44,6 +44,20 @@ describe('convert', () => {
       expect(out).toBeUndefined();
       expect(codes(problems)).toEqual(['unknown-root']);
     });
+
+    it('can explicitly select a global element from an imported schema', () => {
+      const { schema: out, problems } = convert({
+        files: {
+          'entry.xsd': schema('<xs:import namespace="urn:other" schemaLocation="other.xsd"/>'),
+          'other.xsd': schema('<xs:element name="Imported" type="xs:integer"/>', 'urn:other'),
+        },
+        entry: 'entry.xsd',
+        root: '{urn:other}Imported',
+      });
+      expect(problems).toEqual([]);
+      expect(out?.type).toBe('integer');
+      expect(out?.xml).toEqual({ name: 'Imported', namespace: 'urn:other' });
+    });
   });
 
   describe('schema documents', () => {
@@ -320,6 +334,16 @@ describe('convert', () => {
   });
 
   describe('values', () => {
+    it.each(['fixed', 'default'])('reports a non-finite numeric %s instead of emitting null', (kind) => {
+      const { schema: out, problems } = convert({
+        files: { 'a.xsd': schema(`<xs:element name="A" type="xs:double" ${kind}="1e999"/>`) },
+        entry: 'a.xsd',
+      });
+      expect(problems).toMatchObject([{ code: 'invalid-value', severity: 'error', file: 'a.xsd' }]);
+      expect(out?.type).toBe('number');
+      expect(out).not.toHaveProperty(kind === 'fixed' ? 'const' : 'default');
+    });
+
     it('give enumerations, fixed and default values the JSON type of the declared type', () => {
       const { schema: out } = convert({
         files: {
