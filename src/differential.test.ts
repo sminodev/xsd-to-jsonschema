@@ -128,6 +128,34 @@ describe('convert: XML Schema and JSON Schema agree', () => {
     });
   });
 
+  it('on an optional choice whose branch can be empty through a nested optional choice', async () => {
+    const files = {
+      'optional.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:choice minOccurs="0">
+					<xs:element name="A" type="xs:string"/>
+					<xs:sequence>
+						<xs:choice minOccurs="0">
+							<xs:element name="B" type="xs:string"/>
+							<xs:element name="C" type="xs:string"/>
+						</xs:choice>
+					</xs:sequence>
+				</xs:choice>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    await check(files, {
+      empty: [instance(''), true],
+      a: [instance('<A>a</A>'), true],
+      b: [instance('<B>b</B>'), true],
+      aAndB: [instance('<A>a</A><B>b</B>'), false],
+      bAndC: [instance('<B>b</B><C>c</C>'), false],
+    });
+  });
+
   it('on repetition, arrays and optional sequences', async () => {
     const files = {
       'occurs.xsd': schema(`
@@ -171,6 +199,7 @@ describe('convert: XML Schema and JSON Schema agree', () => {
 				<xs:element name="Flag" type="Flag" minOccurs="0"/>
 				<xs:element name="Count" type="Count" minOccurs="0"/>
 				<xs:element name="Amount" type="Amount" minOccurs="0"/>
+				<xs:element name="Rate" type="Rate" minOccurs="0"/>
 				<xs:element name="Small" type="Small" minOccurs="0"/>
 				<xs:element name="Plain" minOccurs="0">
 					<xs:simpleType>
@@ -215,6 +244,13 @@ describe('convert: XML Schema and JSON Schema agree', () => {
 			<xs:maxExclusive value="100"/>
 		</xs:restriction>
 	</xs:simpleType>
+	<xs:simpleType name="Rate">
+		<xs:restriction base="xs:decimal">
+			<xs:fractionDigits value="5"/>
+			<xs:minInclusive value="0"/>
+			<xs:maxInclusive value="999999.99999"/>
+		</xs:restriction>
+	</xs:simpleType>
 	<xs:simpleType name="Amount">
 		<xs:restriction base="xs:decimal">
 			<xs:fractionDigits value="2"/>
@@ -244,6 +280,10 @@ describe('convert: XML Schema and JSON Schema agree', () => {
       amount: [instance('<Amount>12.34</Amount>'), true],
       amountFraction: [instance('<Amount>1.234</Amount>'), false],
       amountMax: [instance('<Amount>10000</Amount>'), false],
+      amountTwoDigits: [instance('<Amount>1.12</Amount>'), true],
+      rateWhole: [instance('<Rate>1</Rate>'), true],
+      rateLarge: [instance('<Rate>999999.99999</Rate>'), true],
+      rateFraction: [instance('<Rate>0.000011</Rate>'), false],
       small: [instance('<Small>-999</Small>'), true],
       smallTooLong: [instance('<Small>1000</Small>'), false],
       plain: [instance('<Plain>abc</Plain>'), true],
@@ -468,6 +508,151 @@ describe('convert: XML Schema and JSON Schema agree', () => {
     });
   });
 
+  it('on extension points with xs:any and xs:anyAttribute', async () => {
+    const files = {
+      'any.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="Id" type="xs:string"/>
+				<xs:element name="Extension" minOccurs="0">
+					<xs:complexType>
+						<xs:sequence>
+							<xs:any namespace="##other" processContents="lax" maxOccurs="unbounded"/>
+						</xs:sequence>
+					</xs:complexType>
+				</xs:element>
+				<xs:element name="Note">
+					<xs:complexType>
+						<xs:simpleContent>
+							<xs:extension base="xs:string">
+								<xs:anyAttribute namespace="##other" processContents="skip"/>
+							</xs:extension>
+						</xs:simpleContent>
+					</xs:complexType>
+				</xs:element>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const { problems } = await check(files, {
+      plain: [instance('<Id>1</Id><Note>n</Note>'), true],
+      extension: [instance('<Id>1</Id><Extension><o:Any xmlns:o="urn:o">x</o:Any></Extension><Note>n</Note>'), true],
+      foreignAttribute: [instance('<Id>1</Id><Note xmlns:o="urn:o" o:lang="de">n</Note>'), true],
+      noId: [instance('<Extension><o:Any xmlns:o="urn:o">x</o:Any></Extension><Note>n</Note>'), false],
+      unknownElsewhere: [instance('<Id>1</Id><Other>o</Other><Note>n</Note>'), false],
+    });
+    expect(problems.map((p) => `${p.severity}:${p.code}`)).toEqual([
+      'warning:unsupported-any',
+      'warning:unsupported-any',
+    ]);
+  });
+
+  it('on mixed content, written as a string of markup', async () => {
+    const files = {
+      'mixed.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="Note" type="RichText"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	<xs:complexType name="RichText" mixed="true">
+		<xs:choice minOccurs="0" maxOccurs="unbounded">
+			<xs:element name="b" type="xs:string"/>
+			<xs:element name="i" type="xs:string"/>
+		</xs:choice>
+		<xs:attribute name="lang" type="xs:language" use="required"/>
+	</xs:complexType>`),
+    };
+    // The elements inside mixed content are not checked, so the cases leave out documents that only they make invalid.
+    const { schema: out, problems } = await check(files, {
+      text: [instance('<Note lang="de">Hello <b>World</b>, <i>again</i>!</Note>'), true],
+      empty: [instance('<Note lang="de"/>'), true],
+      noLang: [instance('<Note>Hello</Note>'), false],
+      badLang: [instance('<Note lang="toolonglanguage">Hello</Note>'), false],
+      noNote: [instance(''), false],
+    });
+    expect(def(out, 'RichText').properties?.['value']).toEqual({ type: 'string', xml: { text: true, mixed: true } });
+    expect(problems.map((p) => `${p.severity}:${p.code}`)).toEqual(['warning:unsupported-mixed']);
+  });
+
+  it('on unions of simple types and restrictions of unions', async () => {
+    const files = {
+      'union.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="When" type="PartialDate" minOccurs="0"/>
+				<xs:element name="Day" type="Day2026" minOccurs="0"/>
+				<xs:element name="Size" type="Size" minOccurs="0"/>
+				<xs:element name="Count" type="CountOrNone" minOccurs="0"/>
+				<xs:element name="Measure" type="DecimalOrDouble" minOccurs="0"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	<xs:simpleType name="PartialDate">
+		<xs:union memberTypes="xs:gYear xs:gYearMonth xs:date"/>
+	</xs:simpleType>
+	<xs:simpleType name="Day2026">
+		<xs:restriction base="PartialDate">
+			<xs:pattern value="2026-\\d{2}-\\d{2}"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="Size">
+		<xs:union>
+			<xs:simpleType>
+				<xs:restriction base="xs:token">
+					<xs:enumeration value="S"/>
+					<xs:enumeration value="M"/>
+					<xs:enumeration value="L"/>
+				</xs:restriction>
+			</xs:simpleType>
+			<xs:simpleType>
+				<xs:restriction base="xs:string">
+					<xs:pattern value="\\d{2}cm"/>
+				</xs:restriction>
+			</xs:simpleType>
+		</xs:union>
+	</xs:simpleType>
+	<xs:simpleType name="DecimalOrDouble">
+		<xs:union memberTypes="xs:decimal xs:double"/>
+	</xs:simpleType>
+	<xs:simpleType name="CountOrNone">
+		<xs:union memberTypes="xs:integer">
+			<xs:simpleType>
+				<xs:restriction base="xs:string">
+					<xs:enumeration value="none"/>
+				</xs:restriction>
+			</xs:simpleType>
+		</xs:union>
+	</xs:simpleType>`),
+    };
+    const { schema: out, problems } = await check(files, {
+      year: [instance('<When>2026</When>'), true],
+      yearMonth: [instance('<When>2026-11</When>'), true],
+      date: [instance('<When>2026-11-04</When>'), true],
+      badMonth: [instance('<When>2026-13</When>'), false],
+      shortYear: [instance('<When>26</When>'), false],
+      day: [instance('<Day>2026-11-04</Day>'), true],
+      otherYear: [instance('<Day>2025-11-04</Day>'), false],
+      yearOnlyDay: [instance('<Day>2026</Day>'), false],
+      size: [instance('<Size>M</Size>'), true],
+      centimetres: [instance('<Size>12cm</Size>'), true],
+      unknownSize: [instance('<Size>XL</Size>'), false],
+      shortCentimetres: [instance('<Size>1cm</Size>'), false],
+      count: [instance('<Count>5</Count>'), true],
+      none: [instance('<Count>none</Count>'), true],
+      decimal: [instance('<Measure>1.5</Measure>'), true],
+      negative: [instance('<Measure>-2</Measure>'), true],
+      double: [instance('<Measure>1e3</Measure>'), true],
+      noNumber: [instance('<Measure>x</Measure>'), false],
+    });
+    expect(problems.map((p) => `${p.severity}:${p.code}`)).toEqual(['warning:unsupported-union']);
+    expect(def(out, 'DecimalOrDouble').type).toBe('number');
+  });
+
   it('on dates and times written as XML Schema lexical patterns', async () => {
     const files = {
       'dates.xsd': schema(`
@@ -494,8 +679,49 @@ describe('convert: XML Schema and JSON Schema agree', () => {
         badMonth: [instance('<D>2026-13-04</D>'), false],
         badTime: [instance('<T>25:00:00</T>'), false],
         compactDate: [instance('<D>20261104</D>'), false],
+        leapDay: [instance('<D>2024-02-29</D>'), true],
+        leapCentury: [instance('<D>2000-02-29</D>'), true],
+        noLeapYear: [instance('<D>2026-02-29</D>'), false],
+        noLeapCentury: [instance('<D>1900-02-29</D>'), false],
+        thirtiethOfFebruary: [instance('<D>2026-02-30</D>'), false],
+        thirtyFirstOfApril: [instance('<DT>2026-04-31T10:00:00</DT>'), false],
+        yearZero: [instance('<D>0000-01-01</D>'), false],
+        fiveDigitYear: [instance('<Y>12026</Y>'), true],
       },
       { dateTime: 'pattern' },
     );
+  });
+
+  it('on durations and on the length of binary data', async () => {
+    const files = {
+      'lexical.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="D" type="xs:duration" minOccurs="0"/>
+				<xs:element name="Hash" minOccurs="0">
+					<xs:simpleType>
+						<xs:restriction base="xs:hexBinary">
+							<xs:length value="2"/>
+						</xs:restriction>
+					</xs:simpleType>
+				</xs:element>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    await check(files, {
+      days: [instance('<D>P1D</D>'), true],
+      all: [instance('<D>-P1Y2M3DT4H5M6.7S</D>'), true],
+      shortSeconds: [instance('<D>PT.5S</D>'), true],
+      openSeconds: [instance('<D>PT1.S</D>'), true],
+      nothing: [instance('<D>P</D>'), false],
+      negativeNothing: [instance('<D>-P</D>'), false],
+      emptyTime: [instance('<D>P1YT</D>'), false],
+      weeks: [instance('<D>P1W</D>'), false],
+      twoOctets: [instance('<Hash>0aFF</Hash>'), true],
+      oneOctet: [instance('<Hash>0a</Hash>'), false],
+      threeOctets: [instance('<Hash>0a0b0c</Hash>'), false],
+    });
   });
 });

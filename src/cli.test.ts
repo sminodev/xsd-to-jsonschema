@@ -72,6 +72,23 @@ describe('convertFile and the command line', () => {
     expect(emptyText.out.stderr).toBe('--text-property must not be empty\n');
   });
 
+  it('reads no remote documents and says so', () => {
+    const file = join(dir, 'remote.xsd');
+    writeFileSync(
+      file,
+      `<xs:schema ${XS} targetNamespace="urn:r"><xs:import namespace="urn:o" schemaLocation="https://example.org/o.xsd"/><xs:element name="R" type="xs:string"/></xs:schema>`,
+    );
+    const { problems } = convertFile(file);
+    expect(problems).toEqual([
+      expect.objectContaining({
+        code: 'missing-file',
+        message:
+          'schema document https://example.org/o.xsd could not be read: convertFile reads local files only; ' +
+          'pass a reader function to convert() to supply remote documents',
+      }),
+    ]);
+  });
+
   it('exits with 2 and a message when the entry is a directory or the output cannot be written', () => {
     const directory = capture();
     expect(run([join(dir, 'types'), '--root', 'A'], directory.io)).toBe(2);

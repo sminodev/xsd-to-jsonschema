@@ -120,6 +120,18 @@ describe('SimpleTypes', () => {
       'unknown-type',
     ]);
   });
+
+  it('counts the length of hexBinary in octets and leaves out lengths in base64 octets or list items', () => {
+    const t = types(
+      restriction('Hash', 'xs:hexBinary', '<xs:length value="20"/>') +
+        restriction('Blob', 'xs:base64Binary', '<xs:maxLength value="1024"/>') +
+        restriction('Tokens', 'xs:NMTOKENS', '<xs:maxLength value="3"/>'),
+    );
+    expect(t.schema('Hash')).toMatchObject({ minLength: 40, maxLength: 40 });
+    expect(t.schema('Blob')).toEqual({ type: 'string', contentEncoding: 'base64' });
+    expect(t.schema('Tokens')).not.toHaveProperty('maxLength');
+    expect(t.codes()).toEqual(['unsupported-length', 'unsupported-length']);
+  });
 });
 
 describe('lexicalToJson', () => {

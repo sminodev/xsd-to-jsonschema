@@ -23,7 +23,9 @@ import {
 import { lexicalToJson, type SimpleTypeOptions, type SimpleTypeRef, SimpleTypes } from './simple-types.js';
 
 const SCHEMA_2020_12 = 'https://json-schema.org/draft/2020-12/schema';
-const XML_NS = 'http://www.w3.org/XML/1998/namespace';
+// Complex type content that XML Schema 1.1 added; the converter reports and ignores it.
+const XSD_1_1_CONTENT = ['assert', 'openContent'];
+const IDENTITY_CONSTRAINTS = ['key', 'keyref', 'unique'];
 
 export interface EmitterOptions extends SimpleTypeOptions {
   /** write the `xml` annotations */
@@ -49,6 +51,8 @@ export class Emitter {
   private readonly contentModel: ContentModel;
   private readonly definitions = new Definitions();
   private rootId: string | undefined;
+  /** the global elements that name a substitution group head, by the local name of the head; built on first use */
+  private substitutionGroups: Map<string, { node: Element; head: string }[]> | undefined;
 
   constructor(
     private readonly set: SchemaSet,
@@ -68,6 +72,9 @@ export class Emitter {
     const typeName = attr(root.node, 'type');
     const named =
       typeName !== undefined ? this.set.lookup('complexType', this.set.resolveQName(root.node, typeName)) : undefined;
+    if (named) {
+      this.checkElement(decl);
+    }
     const content = named ? this.complexType(named.node, named.doc) : this.declarationType(decl, true);
     const defs = this.definitions.buildAll();
     const schema: JsonSchema = { $schema: SCHEMA_2020_12 };
@@ -161,12 +168,7 @@ export class Emitter {
    */
   private declarationType(decl: ElementDeclaration, inline = false): JsonSchema {
     const node = decl.node;
-    for (const unsupported of ['substitutionGroup', 'abstract', 'nillable']) {
-      const value = attr(node, unsupported);
-      if (value !== undefined && value !== 'false') {
-        this.problems.error('unsupported-element', `${unsupported} on an element is not supported`, this.set.at(node));
-      }
-    }
+    this.checkElement(decl);
     const typeName = attr(node, 'type');
     const anonymousComplex = xsChild(node, 'complexType');
     const anonymousSimple = xsChild(node, 'simpleType');
@@ -194,6 +196,58 @@ export class Emitter {
       schema = {};
     }
     return this.withValues(schema, node, valueType);
+  }
+
+  /** Reports what an element declaration means in XML that its JSON property cannot express. */
+  private checkElement(decl: ElementDeclaration): void {
+    const node = decl.node;
+    const at = this.set.at(node);
+    for (const unsupported of ['abstract', 'nillable']) {
+      const value = attr(node, unsupported);
+      if (value !== undefined && value !== 'false') {
+        this.problems.error('unsupported-element', `${unsupported} on an element is not supported`, at);
+      }
+    }
+    const members = decl.global ? this.substitutionMembers(decl) : [];
+    if (members.length > 0) {
+      this.problems.error(
+        'unsupported-element',
+        `${decl.name} heads a substitution group; its members (${members.join(', ')}) are not accepted in its place`,
+        at,
+      );
+    }
+    for (const child of xsChildren(node)) {
+      if (IDENTITY_CONSTRAINTS.includes(child.localName ?? '')) {
+        this.problems.warning(
+          'unsupported-identity-constraint',
+          `xs:${child.localName} ${attr(child, 'name') ?? ''} is not checked`,
+          this.set.at(child),
+        );
+      } else if (child.localName === 'alternative') {
+        this.problems.error(
+          'unsupported-element',
+          'xs:alternative (XML Schema 1.1) is ignored; the declared type is used',
+          this.set.at(child),
+        );
+      }
+    }
+  }
+
+  /** The names of the global elements that may stand in for a global element (its substitution group). */
+  private substitutionMembers(decl: ElementDeclaration): string[] {
+    if (this.substitutionGroups === undefined) {
+      this.substitutionGroups = new Map();
+      for (const { node } of this.set.components.element.values()) {
+        // XML Schema 1.0 allows one head, 1.1 a list of them.
+        for (const head of (attr(node, 'substitutionGroup') ?? '').split(/\s+/).filter((q) => q.length > 0)) {
+          const local = head.slice(head.indexOf(':') + 1);
+          this.substitutionGroups.set(local, [...(this.substitutionGroups.get(local) ?? []), { node, head }]);
+        }
+      }
+    }
+    return (this.substitutionGroups.get(decl.name) ?? [])
+      .filter(({ node, head }) => this.set.resolveQName(node, head).ns === decl.ns)
+      .map(({ node }) => attr(node, 'name') ?? '');
   }
 
   private withValues(schema: JsonSchema, node: Element, valueType: SimpleTypeRef | undefined): JsonSchema {
@@ -269,13 +323,11 @@ export class Emitter {
       const name = this.set.resolveQName(node, ref);
       const global = this.set.lookup('attribute', name);
       if (!global) {
-        if (name.ns !== XML_NS) {
-          this.problems.error(
-            'unknown-attribute',
-            `attribute {${name.ns}}${name.local} is not defined`,
-            this.set.at(node),
-          );
-        }
+        this.problems.error(
+          'unknown-attribute',
+          `attribute {${name.ns}}${name.local} is not defined`,
+          this.set.at(node),
+        );
         return undefined;
       }
       decl = global.node;
@@ -314,8 +366,17 @@ export class Emitter {
     return { key, schema: annotate(schema, docs, xml), node, required: use === 'required' };
   }
 
-  /** The attributes of a complex type or derivation, with attribute groups expanded. */
-  private attributes(owner: Element, doc: SchemaDocument, seen = new Set<Element>()): AttributeProp[] {
+  /**
+   * The attributes of a complex type or derivation, with attribute groups expanded.
+   *
+   * @param fragment - marked as open when xs:anyAttribute allows other attributes
+   */
+  private attributes(
+    owner: Element,
+    doc: SchemaDocument,
+    fragment: Fragment,
+    seen = new Set<Element>(),
+  ): AttributeProp[] {
     const out: AttributeProp[] = [];
     for (const child of xsChildren(owner)) {
       if (child.localName === 'attribute') {
@@ -331,12 +392,13 @@ export class Emitter {
         } else if (seen.has(group.node)) {
           this.problems.error('circular-group', `attribute group ${ref} refers to itself`, this.set.at(child));
         } else {
-          out.push(...this.attributes(group.node, group.doc, new Set([...seen, group.node])));
+          out.push(...this.attributes(group.node, group.doc, fragment, new Set([...seen, group.node])));
         }
       } else if (child.localName === 'anyAttribute') {
+        fragment.open = true;
         this.problems.warning(
           'unsupported-any',
-          'xs:anyAttribute: other attributes are rejected (objects are closed)',
+          'xs:anyAttribute: the object accepts other properties without checking them',
           this.set.at(child),
         );
       }
@@ -357,19 +419,19 @@ export class Emitter {
       return { fragment: emptyFragment(), attributes: [] };
     }
     seen.add(node);
-    if (attr(node, 'mixed') === 'true') {
-      this.problems.error(
-        'unsupported-mixed',
-        'mixed content: the text between elements is not written',
-        this.set.at(node),
-      );
-    }
+    this.checkXsd11Content(node);
     const simpleContent = xsChild(node, 'simpleContent');
     if (simpleContent) {
       return this.simpleContent(simpleContent, doc, seen);
     }
     const complexContent = xsChild(node, 'complexContent');
     const derivation = complexContent ? xsChildren(complexContent)[0] : undefined;
+    if (derivation) {
+      this.checkXsd11Content(derivation);
+    }
+    if (attr(node, 'mixed') === 'true' || (complexContent && attr(complexContent, 'mixed') === 'true')) {
+      return this.mixedContent(node, derivation, doc, seen);
+    }
     if (derivation) {
       const baseQName = attr(derivation, 'base') ?? '';
       const baseName = this.set.resolveQName(derivation, baseQName);
@@ -387,11 +449,53 @@ export class Emitter {
         attributes = this.content(base.node, base.doc, seen).attributes;
       }
       this.contentModel.compositor(derivation, doc, fragment);
-      return { fragment, attributes: overrideAttributes(attributes, this.attributes(derivation, doc)) };
+      return { fragment, attributes: overrideAttributes(attributes, this.attributes(derivation, doc, fragment)) };
     }
     const fragment = emptyFragment();
     this.contentModel.compositor(node, doc, fragment);
-    return { fragment, attributes: this.attributes(node, doc).filter((a) => !a.prohibited) };
+    return { fragment, attributes: this.attributes(node, doc, fragment).filter((a) => !a.prohibited) };
+  }
+
+  /**
+   * Mixed content: the attributes, and the text with the child elements as one string of XML markup. The child
+   * elements are not checked.
+   */
+  private mixedContent(
+    node: Element,
+    derivation: Element | undefined,
+    doc: SchemaDocument,
+    seen: Set<Element>,
+  ): { fragment: Fragment; attributes: AttributeProp[] } {
+    this.problems.warning(
+      'unsupported-mixed',
+      'mixed content is written as a string of XML markup; the elements in it are not checked',
+      this.set.at(node),
+    );
+    const fragment = emptyFragment();
+    let attributes: AttributeProp[];
+    if (derivation) {
+      const baseQName = attr(derivation, 'base') ?? '';
+      const baseName = this.set.resolveQName(derivation, baseQName);
+      const base = this.set.lookup('complexType', baseName);
+      let inherited: AttributeProp[] = [];
+      if (base) {
+        const content = this.content(base.node, base.doc, seen);
+        inherited = content.attributes;
+        fragment.open = derivation.localName === 'extension' && content.fragment.open === true;
+      } else if (!(baseName.ns === XS && baseName.local === 'anyType')) {
+        this.problems.error('unknown-type', `base type ${baseQName} is not defined`, this.set.at(derivation));
+      }
+      attributes = overrideAttributes(inherited, this.attributes(derivation, doc, fragment));
+    } else {
+      attributes = this.attributes(node, doc, fragment).filter((a) => !a.prohibited);
+    }
+    const text: JsonSchema = { type: 'string' };
+    if (this.options.xml) {
+      text.xml = { text: true, mixed: true };
+    }
+    fragment.props.push({ key: this.options.textProperty, schema: text, node });
+    fragment.required.push(this.options.textProperty);
+    return { fragment, attributes };
   }
 
   /**
@@ -408,10 +512,15 @@ export class Emitter {
     if (!derivation) {
       return { fragment, attributes: [] };
     }
-    if (derivation.localName !== 'extension') {
+    this.checkXsd11Content(derivation);
+    // A restriction that only changes attributes is converted exactly; facets on the text are not applied.
+    const facets = xsChildren(derivation).filter(
+      (c) => !['attribute', 'attributeGroup', 'anyAttribute', ...XSD_1_1_CONTENT].includes(c.localName ?? ''),
+    );
+    if (derivation.localName !== 'extension' && facets.length > 0) {
       this.problems.error(
         'unsupported-simple-content',
-        'simpleContent restriction is not supported; its facets are not applied',
+        `a simpleContent restriction is written without its ${facets.map((f) => `xs:${f.localName}`).join(', ')}`,
         this.set.at(derivation),
       );
     }
@@ -423,6 +532,8 @@ export class Emitter {
     if (complexBase) {
       const base = this.content(complexBase.node, complexBase.doc, seen);
       inherited = base.attributes;
+      // An extension keeps the attribute wildcard of its base; a restriction states its own.
+      fragment.open = derivation.localName === 'extension' && base.fragment.open === true;
       value = base.fragment.props.find((prop) => prop.key === this.options.textProperty)?.schema;
       if (value === undefined) {
         this.problems.error(
@@ -440,7 +551,20 @@ export class Emitter {
     }
     fragment.props.push({ key: this.options.textProperty, schema: value, node: derivation });
     fragment.required.push(this.options.textProperty);
-    return { fragment, attributes: overrideAttributes(inherited, this.attributes(derivation, doc)) };
+    return { fragment, attributes: overrideAttributes(inherited, this.attributes(derivation, doc, fragment)) };
+  }
+
+  /** Reports the assertions and open content of XML Schema 1.1 in a complex type or derivation, which are ignored. */
+  private checkXsd11Content(owner: Element): void {
+    for (const child of xsChildren(owner)) {
+      if (XSD_1_1_CONTENT.includes(child.localName ?? '')) {
+        this.problems.error(
+          'unsupported-particle',
+          `xs:${child.localName} (XML Schema 1.1) is ignored`,
+          this.set.at(child),
+        );
+      }
+    }
   }
 
   /** The object schema of a complex type: attributes first, then the properties of the content model. */
@@ -481,7 +605,9 @@ export class Emitter {
     if (required.length > 0) {
       schema.required = required;
     }
-    schema.additionalProperties = false;
+    if (!fragment.open) {
+      schema.additionalProperties = false;
+    }
     if (Object.keys(fragment.dependentRequired).length > 0) {
       schema.dependentRequired = fragment.dependentRequired;
     }

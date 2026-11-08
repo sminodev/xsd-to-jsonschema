@@ -11,7 +11,7 @@ Imports and includes are read relative to the entry file.
 Options:
   --root <name>          root element: name, prefix:name or {namespace}name
                          (needed if the entry declares more than one global element)
-  --date-time <mode>     format (RFC 3339, the default) or pattern (the XML Schema format)
+  --date-time <mode>     pattern (the XML Schema format, the default) or format (RFC 3339)
   --no-xml               leave out the xml annotations
   --text-property <name> property for the text of elements with simple content (default: value)
   --out <file>           write to a file instead of stdout
@@ -47,7 +47,7 @@ export function run(argv: string[], io: Io = processIo): number {
       allowPositionals: true,
       options: {
         root: { type: 'string' },
-        'date-time': { type: 'string', default: 'format' },
+        'date-time': { type: 'string', default: 'pattern' },
         'no-xml': { type: 'boolean', default: false },
         'text-property': { type: 'string', default: 'value' },
         out: { type: 'string' },

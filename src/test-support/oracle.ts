@@ -15,7 +15,33 @@ export function ajvFor(schema: JsonSchema): ValidateFunction {
   // ajv-formats is CommonJS: the default import is module.exports, which carries the plugin as `default` too.
   addFormats.default(ajv);
   ajv.addKeyword('xml');
+  // Ajv divides binary floating point numbers, so 1.12 is no multiple of 0.01 for it. JSON numbers are decimal;
+  // check them the way the specification means it.
+  ajv.removeKeyword('multipleOf');
+  ajv.addKeyword({
+    keyword: 'multipleOf',
+    type: 'number',
+    schemaType: 'number',
+    validate: (step: number, value: number) => isMultipleOf(value, step),
+  });
   return ajv.compile(schema);
+}
+
+/** The shortest decimal form of a number as digits and a power of ten: 1.12 is [112n, 2]. */
+function decimal(x: number): [bigint, number] {
+  const [mantissa = '0', exponent = '0'] = x.toExponential().split('e');
+  const [whole = '0', fraction = ''] = mantissa.split('.');
+  const digits = BigInt(whole + fraction);
+  const scale = fraction.length - Number(exponent);
+  return scale >= 0 ? [digits, scale] : [digits * 10n ** BigInt(-scale), 0];
+}
+
+/** Whether `value` is an integer multiple of `step`, computed on their decimal forms. */
+export function isMultipleOf(value: number, step: number): boolean {
+  const [v, vScale] = decimal(value);
+  const [s, sScale] = decimal(step);
+  const scale = Math.max(vScale, sScale);
+  return (v * 10n ** BigInt(scale - vScale)) % (s * 10n ** BigInt(scale - sScale)) === 0n;
 }
 
 export interface Verdict {

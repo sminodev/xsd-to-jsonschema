@@ -30,6 +30,15 @@ describe('convert', () => {
       expect(out?.$schema).toBe('https://json-schema.org/draft/2020-12/schema');
     });
 
+    it('says so when the entry declares no global element', () => {
+      const types = { 't.xsd': schema('<xs:simpleType name="T"><xs:restriction base="xs:string"/></xs:simpleType>') };
+      const { schema: out, problems } = convert({ files: types, entry: 't.xsd' });
+      expect(out).toBeUndefined();
+      expect(problems[0]?.message).toBe(
+        't.xsd declares no global element; choose the document that declares the root element as entry',
+      );
+    });
+
     it('reports an unknown root with the candidates', () => {
       const { schema: out, problems } = convert({ files, entry: 'a.xsd', root: 'C' });
       expect(out).toBeUndefined();
@@ -54,6 +63,25 @@ describe('convert', () => {
           message: 'schema document sub/o.xsd not found',
         }),
       ]);
+    });
+
+    it('hands imports by absolute URL to the reader unchanged', () => {
+      const remote = 'https://example.org/schemas/o.xsd';
+      const texts: Record<string, string> = {
+        'a.xsd': schema(
+          `<xs:import namespace="urn:o" schemaLocation="${remote}"/><xs:element name="A" type="o:Code"/>`,
+        ).replace('xmlns:t=', 'xmlns:o="urn:o" xmlns:t='),
+        [remote]: schema('<xs:include schemaLocation="code.xsd"/>', 'urn:o'),
+        'https://example.org/schemas/code.xsd': schema(
+          '<xs:simpleType name="Code"><xs:restriction base="xs:string"><xs:length value="2"/></xs:restriction></xs:simpleType>',
+          'urn:o',
+        ),
+      };
+      const read: string[] = [];
+      const { schema: out, problems } = convert({ files: (path) => (read.push(path), texts[path]), entry: 'a.xsd' });
+      expect(problems).toEqual([]);
+      expect(read).toEqual(['a.xsd', remote, 'https://example.org/schemas/code.xsd']);
+      expect(out?.$defs?.['Code']).toEqual({ type: 'string', minLength: 2, maxLength: 2 });
     });
 
     it('reads imports relative to the importing document, also through a reader function', () => {
@@ -99,15 +127,16 @@ describe('convert', () => {
       </xs:sequence><xs:attribute name="v" type="xs:string"/></xs:complexType></xs:element>`),
     };
 
-    it('write dates as format by default and as the XML Schema format on request', () => {
-      expect(convert({ files, entry: 'a.xsd' }).schema?.properties?.['D']).toEqual({
+    it('write dates in the XML Schema format by default and as format on request', () => {
+      const date = convert({ files, entry: 'a.xsd' }).schema?.properties?.['D'];
+      expect(date).not.toHaveProperty('format');
+      const pattern = new RegExp((date as { pattern: string }).pattern, 'u');
+      expect(['2026-11-04', '2026-11-04+01:00'].every((d) => pattern.test(d))).toBe(true);
+      expect(convert({ files, entry: 'a.xsd', options: { dateTime: 'format' } }).schema?.properties?.['D']).toEqual({
         type: 'string',
         format: 'date',
         xml: { namespace: 'urn:t' },
       });
-      const date = convert({ files, entry: 'a.xsd', options: { dateTime: 'pattern' } }).schema?.properties?.['D'];
-      expect(date).not.toHaveProperty('format');
-      expect(new RegExp((date as { pattern: string }).pattern, 'u').test('2026-11-04+01:00')).toBe(true);
     });
 
     it('leave out the xml annotations with xml: false', () => {
@@ -188,6 +217,45 @@ describe('convert', () => {
       expect(a).toEqual([expect.objectContaining({ code: 'unknown-type', file: 'a.xsd', line: 1 })]);
       expect(b).toEqual([expect.objectContaining({ code: 'unknown-type', file: 'a.xsd', line: 2 })]);
     });
+
+    it('for a substitution group head, but not for a member used by its own name', () => {
+      const body = `<xs:element name="Shape" type="xs:string"/>
+        <xs:element name="Circle" type="xs:string" substitutionGroup="t:Shape"/>`;
+      const uses = (ref: string) => type(`><xs:sequence><xs:element ref="${ref}"/></xs:sequence>`);
+      const head = convert({ files: { 'a.xsd': schema(uses('Shape') + body) }, entry: 'a.xsd', root: 'A' }).problems;
+      expect(head).toEqual([
+        expect.objectContaining({
+          code: 'unsupported-element',
+          message: expect.stringContaining('(Circle)') as string,
+        }),
+      ]);
+      expect(problemsOf(uses('Circle') + body)).toEqual([]);
+    });
+
+    it('for nillable, abstract and identity constraints, also on a root with a named type', () => {
+      expect(
+        problemsOf(`<xs:element name="A" type="T" nillable="true">
+          <xs:unique name="u"><xs:selector xpath="t:B"/><xs:field xpath="."/></xs:unique></xs:element>
+          <xs:complexType name="T"><xs:sequence><xs:element name="B" type="xs:string" maxOccurs="9"/></xs:sequence></xs:complexType>`),
+      ).toEqual(['unsupported-element', 'unsupported-identity-constraint']);
+    });
+
+    it('for XML Schema 1.1 assertions, open content and type alternatives', () => {
+      expect(
+        problemsOf(
+          type(`><xs:openContent><xs:any/></xs:openContent>
+            <xs:sequence><xs:element name="B" type="xs:int"><xs:alternative type="xs:string"/></xs:element></xs:sequence>
+            <xs:assert test="B gt 0"/>`),
+        ),
+      ).toEqual(['unsupported-particle', 'unsupported-particle', 'unsupported-element']);
+    });
+
+    it('for an attribute of the xml namespace that no imported schema declares', () => {
+      expect(
+        problemsOf(`<xs:import namespace="http://www.w3.org/XML/1998/namespace"/>
+          ${type('><xs:attribute ref="xml:lang"/>')}`),
+      ).toEqual(['unknown-attribute']);
+    });
   });
 
   describe('content models', () => {
@@ -209,6 +277,23 @@ describe('convert', () => {
       expect(problems).toEqual([]);
       expect(Object.keys(out?.properties ?? {})).toEqual(['Kept', 'X']);
       expect(out?.oneOf).toEqual([{ required: ['X'] }]);
+    });
+
+    it('restrict the attributes of simple content without a problem', () => {
+      const { schema: out, problems } = convert({
+        files: {
+          'a.xsd': schema(`<xs:element name="A" type="Required"/>
+            <xs:complexType name="Amount"><xs:simpleContent><xs:extension base="xs:decimal">
+              <xs:attribute name="currency" type="xs:string"/>
+            </xs:extension></xs:simpleContent></xs:complexType>
+            <xs:complexType name="Required"><xs:simpleContent><xs:restriction base="Amount">
+              <xs:attribute name="currency" type="xs:string" use="required"/>
+            </xs:restriction></xs:simpleContent></xs:complexType>`),
+        },
+        entry: 'a.xsd',
+      });
+      expect(problems).toEqual([]);
+      expect(out?.required).toEqual(['currency', 'value']);
     });
 
     it('inherit the text and the attributes of a complex type with simple content', () => {

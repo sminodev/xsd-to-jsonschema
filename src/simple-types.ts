@@ -6,21 +6,35 @@ import { combinePatterns, translateBody, XsdRegexError } from './xsd-regex.js';
 
 // Lexical forms of XML Schema (Part 2, 3.2), written as XML Schema patterns and translated like any other pattern.
 const TZ = '(Z|(\\+|-)((0[0-9]|1[0-3]):[0-5][0-9]|14:00))?';
-const YEAR = '-?([1-9][0-9]{3,}|0[0-9]{3})';
+// Four digits or more, without leading zeros beyond four digits; XML Schema 1.0 has no year 0000.
+const YEAR = '-?([1-9][0-9]{3,}|0[0-9]{2}[1-9]|0[0-9][1-9][0-9]|0[1-9][0-9]{2})';
+// Years divisible by 4, except centuries that are not divisible by 400.
+const LEAP_YEAR =
+  '-?([1-9][0-9]*([0-9]{2}(0[48]|[2468][048]|[13579][26])|([02468][048]|[13579][26])00)' +
+  '|[0-9]{2}(0[48]|[2468][048]|[13579][26])|(0[48]|[2468][048]|[13579][26])00)';
 const MONTH = '(0[1-9]|1[0-2])';
 const DAY = '(0[1-9]|[12][0-9]|3[01])';
+// The days each month has, apart from 29 February.
+const MONTH_DAY =
+  '((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))';
+const DATE = `(${YEAR}-${MONTH_DAY}|${LEAP_YEAR}-02-29)`;
 const TIME = '(([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?|(24:00:00(\\.0+)?))';
+// A duration has at least one part; seconds may be written as `1.5`, `1.` or `.5`.
+const SECONDS = '([0-9]+(\\.[0-9]*)?|\\.[0-9]+)S';
+const DURATION_TIME = `T([0-9]+H([0-9]+M)?(${SECONDS})?|[0-9]+M(${SECONDS})?|${SECONDS})`;
+const DURATION =
+  `-?P([0-9]+Y([0-9]+M)?([0-9]+D)?(${DURATION_TIME})?|[0-9]+M([0-9]+D)?(${DURATION_TIME})?` +
+  `|[0-9]+D(${DURATION_TIME})?|${DURATION_TIME})`;
 const NCNAME = '[\\i-[:]][\\c-[:]]*';
 const LEXICAL: Record<string, string> = {
-  date: `${YEAR}-${MONTH}-${DAY}${TZ}`,
-  dateTime: `${YEAR}-${MONTH}-${DAY}T${TIME}${TZ}`,
+  date: `${DATE}${TZ}`,
+  dateTime: `${DATE}T${TIME}${TZ}`,
   time: `${TIME}${TZ}`,
-  duration:
-    '-?P(([0-9]+Y)?([0-9]+M)?([0-9]+D)?(T(([0-9]+H)([0-9]+M)?([0-9]+(\\.[0-9]+)?S)?|([0-9]+M)([0-9]+(\\.[0-9]+)?S)?|([0-9]+(\\.[0-9]+)?S)))?)',
+  duration: DURATION,
   gYear: `${YEAR}${TZ}`,
   gYearMonth: `${YEAR}-${MONTH}${TZ}`,
   gMonth: `--${MONTH}${TZ}`,
-  gMonthDay: `--${MONTH}-${DAY}${TZ}`,
+  gMonthDay: `--(${MONTH_DAY}|02-29)${TZ}`,
   gDay: `---${DAY}${TZ}`,
   language: '[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*',
   Name: '\\i\\c*',
@@ -122,6 +136,8 @@ interface Derivation {
   steps: { node: Element; facets: Element[] }[];
   /** a named type that is not defined, and the node that names it */
   missing?: { name: QName; from: Element | undefined };
+  /** the xs:union element and its member types, for a union */
+  union?: { node: Element; members: SimpleTypeRef[] };
 }
 
 /** Facets whose value counts something, with the smallest value they allow. */
@@ -139,6 +155,9 @@ interface Bound {
 }
 
 export class SimpleTypes {
+  /** the unions whose members are being written, to stop a union that contains itself */
+  private readonly openUnions = new Set<Element>();
+
   constructor(
     private readonly set: SchemaSet,
     private readonly problems: Problems,
@@ -190,8 +209,14 @@ export class SimpleTypes {
     if (xsChild(type, 'list')) {
       return { builtin: 'string', variety: 'list', steps: [] };
     }
-    if (xsChild(type, 'union')) {
-      return { builtin: 'string', variety: 'union', steps: [] };
+    const union = xsChild(type, 'union');
+    if (union) {
+      const named = (attr(union, 'memberTypes') ?? '')
+        .split(/\s+/)
+        .filter((qname) => qname.length > 0)
+        .map((qname) => this.set.resolveQName(union, qname));
+      const members: SimpleTypeRef[] = [...named, ...xsChildren(union).filter((c) => c.localName === 'simpleType')];
+      return { builtin: 'string', variety: 'union', steps: [], union: { node: union, members } };
     }
     return { builtin: 'anySimpleType', variety: 'atomic', steps: [] };
   }
@@ -199,6 +224,16 @@ export class SimpleTypes {
   /** The JSON type of a simple type, used to convert fixed and default values. */
   jsonType(type: SimpleTypeRef, from?: Element): JsonType | undefined {
     const derivation = this.derive(type, from);
+    if (derivation.union) {
+      const { node, members } = derivation.union;
+      if (this.openUnions.has(node)) {
+        return 'string';
+      }
+      this.openUnions.add(node);
+      const json = sharedJsonType(members.map((member) => this.jsonType(member, node)));
+      this.openUnions.delete(node);
+      return json ?? 'string';
+    }
     if (derivation.variety !== 'atomic') {
       return 'string';
     }
@@ -254,9 +289,8 @@ export class SimpleTypes {
       );
       return { type: 'string' };
     }
-    if (derivation.variety === 'union') {
-      this.problems.error('unsupported-union', 'xs:union accepts any string here', at);
-      return { type: 'string' };
+    if (derivation.union) {
+      return this.unionSchema(derivation, derivation.union, at);
     }
     const schema = this.builtinSchema(derivation.builtin);
     const json = schema.type;
@@ -304,15 +338,27 @@ export class SimpleTypes {
             }
             break;
           case 'length':
-            schema.minLength = Math.max(schema.minLength || 0, Number(value));
-            schema.maxLength = Math.min(schema.maxLength ?? Infinity, Number(value));
-            break;
           case 'minLength':
-            schema.minLength = Math.max(schema.minLength || 0, Number(value));
+          case 'maxLength': {
+            // The length of binary data counts octets, that of a list its items.
+            if (derivation.builtin === 'base64Binary' || LISTS.includes(derivation.builtin)) {
+              const unit = LISTS.includes(derivation.builtin) ? 'items' : 'octets';
+              this.problems.warning(
+                'unsupported-length',
+                `${facet.localName} on xs:${derivation.builtin} counts ${unit}, not characters; it is left out`,
+                facetAt,
+              );
+              break;
+            }
+            const characters = Number(value) * (derivation.builtin === 'hexBinary' ? 2 : 1);
+            if (facet.localName !== 'maxLength') {
+              schema.minLength = Math.max(schema.minLength || 0, characters);
+            }
+            if (facet.localName !== 'minLength') {
+              schema.maxLength = Math.min(schema.maxLength ?? Infinity, characters);
+            }
             break;
-          case 'maxLength':
-            schema.maxLength = Math.min(schema.maxLength ?? Infinity, Number(value));
-            break;
+          }
           case 'minInclusive':
           case 'minExclusive':
           case 'maxInclusive':
@@ -414,6 +460,77 @@ export class SimpleTypes {
     return schema;
   }
 
+  /**
+   * An xs:union gets the JSON type its members share and becomes an `anyOf` of the member types. Patterns and
+   * enumerations of restrictions on the union apply to the whole value. If the members have different JSON types,
+   * the value is a string and is checked as a string only.
+   */
+  private unionSchema(derivation: Derivation, union: NonNullable<Derivation['union']>, at: At | undefined): JsonSchema {
+    if (this.openUnions.has(union.node)) {
+      this.problems.error('circular-type', 'a union that contains itself', this.at(union.node));
+      return { type: 'string' };
+    }
+    this.openUnions.add(union.node);
+    const members = union.members.map((member) => this.schema(member, union.node));
+    this.openUnions.delete(union.node);
+    const json = sharedJsonType(members.map((m) => m.type));
+    const schema: JsonSchema = { type: json ?? 'string' };
+    // A member without facets of that very type accepts every value, and so does the union then.
+    const acceptsAll = (m: JsonSchema) =>
+      (m.type ?? 'string') === schema.type && Object.keys(m).every((k) => k === 'type' || k === 'description');
+    if (json === undefined) {
+      this.problems.warning(
+        'unsupported-union',
+        'xs:union whose members have different JSON types: the value is checked as a string only',
+        at,
+      );
+    } else if (members.length > 0 && !members.some(acceptsAll)) {
+      schema.anyOf = members.map((member) => {
+        const copy: JsonSchema = { ...member };
+        delete copy.description;
+        return copy;
+      });
+    }
+    const patternSteps: string[][] = [];
+    let enumeration: { values: string[]; at: Element } | undefined;
+    for (const step of derivation.steps) {
+      const patterns: string[] = [];
+      const values: string[] = [];
+      for (const facet of step.facets) {
+        if (facet.localName === 'pattern') {
+          try {
+            patterns.push(translateBody(attr(facet, 'value') ?? ''));
+          } catch (e) {
+            if (!(e instanceof XsdRegexError)) {
+              throw e;
+            }
+            this.problems.error('untranslatable-pattern', e.message, this.at(facet));
+          }
+        } else if (facet.localName === 'enumeration') {
+          values.push(attr(facet, 'value') ?? '');
+        } else if (facet.localName !== 'whiteSpace') {
+          this.problems.error('unsupported-facet', `xs:${facet.localName} on a union is not supported`, this.at(facet));
+        }
+      }
+      if (patterns.length > 0) {
+        patternSteps.push(patterns);
+      }
+      if (values.length > 0) {
+        enumeration = { values, at: step.node };
+      }
+    }
+    if (patternSteps.length > 0 && schema.type === 'string') {
+      schema.pattern = combinePatterns(patternSteps);
+    } else if (patternSteps.length > 0 && enumeration === undefined) {
+      this.problems.warning(
+        'lexical-pattern',
+        `a pattern on a union of ${schema.type ?? ''} types restricts the XML text; JSON values are not checked against it`,
+        at,
+      );
+    }
+    return enumeration ? this.enumSchema(schema, enumeration.values, enumeration.at) : schema;
+  }
+
   // An enumeration next to other facets: values that break a facet can never occur, so they are left out and the
   // facets dropped. The result accepts the same values.
   private enumSchema(schema: JsonSchema, values: string[], at: Element): JsonSchema {
@@ -450,6 +567,15 @@ export class SimpleTypes {
     out.enum = kept;
     return out;
   }
+}
+
+/** The JSON type all members of a union share, with integer and number counted as number; undefined if they differ. */
+function sharedJsonType(types: (JsonType | undefined)[]): JsonType | undefined {
+  const distinct = new Set(types.map((type) => type ?? 'string'));
+  if (distinct.size === 1) {
+    return [...distinct][0];
+  }
+  return [...distinct].every((type) => type === 'integer' || type === 'number') ? 'number' : undefined;
 }
 
 function tightest(bounds: Bound[], isLower: boolean): Bound | undefined {

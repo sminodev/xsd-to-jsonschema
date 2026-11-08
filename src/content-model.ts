@@ -36,6 +36,8 @@ export interface Fragment {
   dependentRequired: Record<string, string[]>;
   /** the fragment is a choice reached through a group reference */
   isChoice?: boolean;
+  /** xs:any or xs:anyAttribute allow other elements or attributes, so the object accepts other properties */
+  open?: boolean;
 }
 
 /** The property of an element particle; the emitter writes it, since it knows declarations and types. */
@@ -64,6 +66,9 @@ export function addConstraints(schema: JsonSchema, constraints: JsonSchema[]): v
 }
 
 export class ContentModel {
+  /** the `{oneOf}` of each choice that can be left out: an optional choice, or one with a branch that can be empty */
+  private readonly optionalChoices = new WeakSet<JsonSchema>();
+
   constructor(
     private readonly set: SchemaSet,
     private readonly problems: Problems,
@@ -91,6 +96,9 @@ export class ContentModel {
       fragment.required.push(...inner.required);
     }
     fragment.constraints.push(...inner.constraints);
+    if (inner.open) {
+      fragment.open = true;
+    }
     for (const [key, list] of Object.entries(inner.dependentRequired)) {
       fragment.dependentRequired[key] = [...new Set([...(fragment.dependentRequired[key] ?? []), ...list])];
     }
@@ -160,9 +168,10 @@ export class ContentModel {
         return;
       }
       case 'any':
-        this.problems.error(
+        fragment.open = true;
+        this.problems.warning(
           'unsupported-any',
-          'xs:any is not supported; its elements are rejected',
+          'xs:any: the object accepts other properties without checking them',
           this.set.at(child),
         );
         return;
@@ -239,6 +248,7 @@ export class ContentModel {
       branches.push({ fragment: branch, node: child });
     }
     const fragment = emptyFragment();
+    fragment.open = branches.some((b) => b.fragment.open);
     const owner = new Map<string, Fragment>();
     for (const { fragment: branch, node: child } of branches) {
       for (const prop of branch.props) {
@@ -250,7 +260,7 @@ export class ContentModel {
         fragment.props.push(prop);
       }
     }
-    const empty = branches.filter((b) => b.fragment.required.length === 0 && b.fragment.constraints.length === 0);
+    const empty = branches.filter((b) => this.canBeEmpty(b.fragment));
     if (empty.length > 1) {
       this.problems.error(
         'ambiguous-choice',
@@ -276,8 +286,17 @@ export class ContentModel {
     if (optional && empty.length === 0) {
       oneOf.push({ properties: Object.fromEntries(fragment.props.map((prop) => [prop.key, false])) });
     }
-    fragment.constraints.push({ oneOf });
+    const constraint: JsonSchema = { oneOf };
+    if (optional || empty.length > 0) {
+      this.optionalChoices.add(constraint);
+    }
+    fragment.constraints.push(constraint);
     return fragment;
+  }
+
+  /** Whether a fragment can occur without any of its properties: it requires none, and its choices can be left out. */
+  private canBeEmpty(fragment: Fragment): boolean {
+    return fragment.required.length === 0 && fragment.constraints.every((c) => this.optionalChoices.has(c));
   }
 
   private addProp(fragment: Fragment, prop: Prop): void {

@@ -3,8 +3,9 @@
 Turn an XML Schema into a JSON Schema.
 
 If your data is described by XSD files but travels as JSON, you still want to validate that JSON. xsd-to-jsonschema
-reads your XSD files, follows their imports and includes, and writes a JSON Schema 2020-12 for the root element you
-pick.
+reads your XML Schema 1.0 files, follows their imports and includes, and writes a JSON Schema 2020-12 for the root
+element you pick. It converts schemas, not documents: [docs/output.md](docs/output.md) describes the JSON form the
+schema expects, and where it can't match the XML Schema exactly, the converter tells you.
 
 ## Install
 
@@ -57,8 +58,6 @@ only one global element. Here is part of the result (the full file is
       "const": true,
       "xml": { "namespace": "urn:example:order" }
     },
-    "DeliveryDate": { "type": "string", "format": "date", "xml": { "namespace": "urn:example:order" } },
-    "DeliveryTime": { "type": "string", "format": "time", "xml": { "namespace": "urn:example:order" } },
     "Contact": { "$ref": "#/$defs/Contact", "xml": { "namespace": "urn:example:order" } },
     "Line": {
       "type": "array",
@@ -92,8 +91,9 @@ only one global element. Here is part of the result (the full file is
 }
 ```
 
-The excerpt skips `CustomerRef`, `Level`, `Packages`, `Notes`, `Attachment` and the definitions `Line`,
-`ServiceLevel` and `BoxSize`. Two things to note: the properties keep the order of the XML Schema, and the `oneOf`
+The excerpt skips `CustomerRef`, `Level`, `Packages`, `Notes`, `Attachment`, the definitions `Line`,
+`ServiceLevel` and `BoxSize`, and `DeliveryDate` and `DeliveryTime`, whose patterns for the XML Schema date and time
+formats are long. Two things to note: the properties keep the order of the XML Schema, and the `oneOf`
 keeps `Pickup` and the delivery date apart, so an order can have one or the other, but not both.
 
 Here is `order.xml` next to its JSON form:
@@ -186,19 +186,29 @@ const { schema, problems } = convert({
 });
 ```
 
+`files` can also be a function that gets a path and returns the text. It gets an import by absolute URL, such as
+`https://www.w3.org/TR/xmldsig-core/xmldsig-core-schema.xsd`, exactly as written, so it can hand over a local copy.
+`convertFile` downloads nothing and reports such an import as `missing-file`.
+
 Once the package is installed, the command line does the same: `npx xsd-to-jsonschema order.xsd --out
 order.schema.json`, and `--help` lists its options.
 
 If the entry schema declares more than one global element, pick one with `root`: `Order`, `prefix:Order` and
-`{urn:example:order}Order` all work. `problems` tells you where the JSON Schema can't express the XML Schema exactly,
-with a code, the file and the line ([all codes](docs/output.md#problems)).
+`{urn:example:order}Order` all work. The other options go into `options`:
 
-| Option         | CLI flag                 | Default  | Description                                                                                                    |
-| -------------- | ------------------------ | -------- | -------------------------------------------------------------------------------------------------------------- |
-| `root`         | `--root <name>`          |          | the root element to convert                                                                                    |
-| `dateTime`     | `--date-time <mode>`     | `format` | dates and times as `format` (RFC 3339, needs a time zone) or `pattern` (XML Schema format, time zone optional) |
-| `xml`          | `--no-xml`               | `true`   | add the `xml` annotations                                                                                      |
-| `textProperty` | `--text-property <name>` | `value`  | the property that holds the text of an element with simple content                                             |
+```js
+const { schema, problems } = convertFile('order.xsd', { root: 'Order', options: { dateTime: 'format' } });
+```
+
+`problems` tells you where the JSON Schema can't express the XML Schema exactly, with a code, the file and the line
+([all codes](docs/output.md#problems)).
+
+| Option         | CLI flag                 | Default   | Description                                                                                                       |
+| -------------- | ------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
+| `root`         | `--root <name>`          |           | the root element to convert                                                                                       |
+| `dateTime`     | `--date-time <mode>`     | `pattern` | dates and times as `pattern` (XML Schema format, time zone optional) or `format` (JSON Schema `format`, RFC 3339) |
+| `xml`          | `--no-xml`               | `true`    | add the `xml` annotations                                                                                         |
+| `textProperty` | `--text-property <name>` | `value`   | the property that holds the text of an element with simple content                                                |
 
 ## Output
 
@@ -206,19 +216,21 @@ The generated schema describes the content of the root element. In short (the de
 [docs/output.md](docs/output.md)):
 
 - Elements and attributes become properties named after their local names: attributes first, then elements in the
-  order of the XML Schema. Objects are closed (`additionalProperties: false`).
+  order of the XML Schema. Objects are closed (`additionalProperties: false`), unless `xs:any` or `xs:anyAttribute`
+  allow other content there.
 - Named types end up in `$defs`. A derived type is merged with its base, so you get one schema instead of a chain.
 - A repeated element becomes an array with `minItems` and `maxItems`.
 - A choice becomes a `oneOf`. Each branch requires its own properties and rules out those of the other branches.
 - `fixed` values become `const` and `default` values stay `default`, both with the JSON type of the declared type:
   `fixed="1"` on an integer becomes `1`, not `"1"`.
 - Patterns are anchored and translated to the regex flavor JSON Schema uses.
-- The `xml` annotation records the XML side (namespace, attribute, text), so you can map a document between XML and
-  JSON. Validators ignore it or need it registered (Ajv: `ajv.addKeyword('xml')`).
+- The `xml` annotation records the XML side (namespace, attribute, text, mixed content), so you can map a document
+  between XML and JSON. Validators ignore it or need it registered (Ajv: `ajv.addKeyword('xml')`).
 
 Two things can't be checked in JSON: the order of elements, since JSON objects have none, and details of the XML
-text such as leading zeros in a number. `xs:list`, `xs:union`, `xs:any` and mixed content aren't fully converted;
-each of them shows up in `problems`.
+text such as leading zeros in a number. `xs:list`, substitution groups and identity constraints aren't supported,
+and the content of `xs:any` and of mixed content isn't checked; where a schema uses them, they show up in `problems`.
+[docs/output.md](docs/output.md#limits) lists all limits.
 
 ## Development
 
