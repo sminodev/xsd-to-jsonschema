@@ -15,6 +15,35 @@ npm run example              # builds and prints the schema for examples/order
 UPDATE_EXAMPLES=1 npm test   # updates examples/order/order.schema.json and order.json
 ```
 
+## XML Schema terms used in the code
+
+You don't need to know the whole XML Schema specification to work on the converter, but the code uses its terms:
+
+- **Schema document, schema set**: one `.xsd` file, and the entry document together with everything it imports
+  (`xs:import`, another namespace) or includes (`xs:include`, the same namespace).
+- **Global component**: a top-level `xs:element`, `xs:attribute`, `xs:complexType`, `xs:simpleType`, `xs:group` or
+  `xs:attributeGroup`. Components are looked up by their expanded name, written `{namespace}name`.
+- **QName**: a name with a prefix in an attribute value, such as `type="c:Text40"`. The prefix means whatever
+  namespace the `xmlns:c` declarations in scope of that element say.
+- **Qualified**: a local element or attribute that belongs to the target namespace (`elementFormDefault`,
+  `attributeFormDefault` or `form`). It ends up in `xml.namespace`.
+- **Simple type**: a value without child elements or attributes. Either built in (`xs:string`, `xs:decimal`, …) or
+  derived from another simple type by a restriction.
+- **Facet**: one rule of a restriction, such as `maxLength`, `pattern`, `enumeration` or `minInclusive`.
+- **Restriction chain**: a simple type restricts another one, which restricts another one, down to a built-in type.
+  A value has to meet the facets of every step.
+- **Complex type**: the type of an element with attributes or child elements. With simple content it has text and
+  attributes; with complex content it has child elements.
+- **Particle**: one entry of a content model, with its `minOccurs` and `maxOccurs`: an element, a model group, a
+  group reference or `xs:any`.
+- **Model group**: `xs:sequence` (the particles in this order), `xs:choice` (exactly one of them) or `xs:all` (each
+  once, in any order).
+
+One term is the converter's own:
+
+- **Fragment**: what a model group contributes to the object it ends up in: its properties in document order, the
+  ones it requires, and one `oneOf` per choice. See `src/content-model.ts`.
+
 ## How the converter works
 
 `convert()` loads the schema documents, finds the root element and hands it to the emitter, which writes the
@@ -28,30 +57,83 @@ convert ──► SchemaSet.load(entry) ──► find the root element ──�
 
 Each module has one job:
 
-| Module                     | What it does                                                                                                                                                                                    |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/index.ts`             | the main entry point: `convert()` and the types; no Node.js built-ins, so it runs in browsers too                                                                                               |
-| `src/node.ts`              | the entry point `xsd-to-jsonschema/node`: everything from `index.ts`, plus `convertFile()`                                                                                                      |
-| `src/convert.ts`           | options and picking the root element                                                                                                                                                            |
-| `src/schema-set.ts`        | parses the documents, follows `xs:import` and `xs:include` relative to the importing file, and looks up global components by `{namespace}name`, resolving prefixes with the namespaces in scope |
-| `src/simple-types.ts`      | walks a simple type down to its built-in type and merges the facets of every restriction step on the way                                                                                        |
-| `src/xsd-regex.ts`         | translates XML Schema patterns into anchored JavaScript patterns for the `u` flag                                                                                                               |
-| `src/emitter.ts`           | writes the JSON Schema: element and attribute declarations, `fixed` and `default`, and the objects of complex types                                                                             |
-| `src/content-model.ts`     | turns sequences, choices, `all` and group references into the properties and constraints of one object                                                                                          |
-| `src/definitions.ts`       | names the entries in `$defs` and builds them in the order of first use                                                                                                                          |
-| `src/json-schema.ts`       | the types of the JSON Schema it writes                                                                                                                                                          |
-| `src/problems.ts`          | the list of problem codes, and collecting the problems with code, severity, file and line                                                                                                       |
-| `src/cli.ts`, `src/bin.ts` | the command line; `bin.ts` only calls `run()` from `cli.ts`, which the tests call directly                                                                                                      |
+- `src/index.ts`: the main entry point, `convert()` and the types. It uses no Node.js built-ins, so it runs in
+  browsers too.
+- `src/node.ts`: the entry point `xsd-to-jsonschema/node`, everything from `index.ts` plus `convertFile()`.
+- `src/convert.ts`: the options, and picking the root element.
+- `src/schema-set.ts`: parses the documents, follows imports and includes relative to the importing file, looks up
+  global components and resolves QNames.
+- `src/emitter.ts`: writes the JSON Schema: element and attribute declarations, `fixed` and `default`, and the
+  objects of complex types.
+- `src/content-model.ts`: turns sequences, choices, `all` and group references into the properties and constraints
+  of one object.
+- `src/definitions.ts`: names the entries in `$defs` and builds them in the order of first use.
+- `src/simple-types.ts`: walks a simple type down its restriction chain and merges the facets into one schema.
+- `src/xsd-regex.ts`: translates XML Schema patterns into anchored JavaScript patterns for the `u` flag.
+- `src/json-schema.ts`: the types of the JSON Schema the converter writes.
+- `src/problems.ts`: the list of problem codes, and collecting the problems with code, file and line.
+- `src/cli.ts`, `src/bin.ts`: the command line. `bin.ts` only calls `run()` from `cli.ts`, which the tests call
+  directly.
 
-A few things about the emitter are worth knowing before you change it:
+If something has no JSON Schema equivalent, the converter writes the closest schema it can and reports a problem
+([list of codes](output.md#problems)). It never stops at the first problem.
 
-- A named type gets its `$defs` name the first time it is referenced, and its definition is written after the one
-  the emitter is working on. That keeps the definitions in the order of first use and makes recursive types work.
-- A content model is turned into a fragment: its properties in document order, the properties it requires, and one
-  `oneOf` per choice. A sequence merges the fragments of its parts. A choice turns the fragments of its branches into
-  one `oneOf` and keeps all their properties in the enclosing object.
-- If something has no JSON Schema equivalent, the emitter writes the closest schema it can and reports a problem
-  ([list of codes](output.md#problems)).
+## A walk through the order example
+
+[`examples/order`](../examples/order) is a good way to see the modules work together. `npm run example` prints the
+result.
+
+1. `SchemaSet.load('order.xsd')` reads `order.xsd`, follows its import of `common.xsd` and its include of `line.xsd`,
+   and indexes the global components of all three: the element `Order`, the complex types `Line` and `Contact`, the
+   simple types `Text40`, `ServiceLevel` and so on.
+2. `order.xsd` declares one global element, so `Order` is the root without a `root` option.
+3. `Emitter.root()` sees that `Order` has an anonymous complex type and writes its object in place. `content()` hands
+   the `xs:sequence` to `ContentModel`, which goes through the particles one by one:
+   - `Title` has the named type `c:Text40`. `typeRef()` asks `Definitions` for a reference and gets
+     `{"$ref": "#/$defs/Text40"}`; the definition itself is built later.
+   - `CustomerRef` has `minOccurs="0"`, so it becomes a property that isn't required.
+   - The `xs:choice` between `Pickup` and the sequence `DeliveryDate`, `DeliveryTime` turns into a fragment with all
+     three properties and one `oneOf`. Each branch requires its own properties and sets the others to `false`:
+
+     ```json
+     "oneOf": [
+       { "required": ["Pickup"], "properties": { "DeliveryDate": false, "DeliveryTime": false } },
+       { "required": ["DeliveryDate"], "properties": { "Pickup": false } }
+     ]
+     ```
+
+   - `Line` has `maxOccurs="5"`, so it becomes an array with `minItems` 1 and `maxItems` 5.
+
+4. `complexType()` writes the object: the attribute `version` first (its `fixed` value becomes `const`), then the
+   properties of the fragment in document order, `required`, `additionalProperties: false`, and the `oneOf`. With two
+   choices in one object it would write an `allOf` of two `oneOf`s.
+5. `Definitions.buildAll()` builds the referenced types in the order they were first used: `Text40`,
+   `ServiceLevel`, `Contact`, `Line`, and then `Email`, `BoxSize` and `Kilogram`, which `Contact` and `Line` refer to.
+
+## Finding out why a schema looks wrong
+
+1. Run the command line on the schema and read stderr first. Every problem has its code, file and line:
+
+   ```sh
+   npm run build
+   node dist/bin.js path/to/entry.xsd --root Order > out.json
+   ```
+
+   [output.md](output.md#problems) explains the codes, and `grep -rn "'unknown-type'" src` shows where one is
+   reported.
+
+2. Make the case small. Copy the type in question into a short schema, the way the tests in `src/convert.test.ts`
+   do, and cut it down until a few lines still show the problem.
+3. Let libxml2 decide what the XML Schema allows. Put the small schema and a few documents into a case in
+   `src/differential.test.ts` and run only that test, for example `npx vitest run src/differential.test.ts -t choices`.
+   When the validators disagree, the failure shows both verdicts, the JSON form of each document and the Ajv errors,
+   which usually point at the property that's off.
+4. Fix it in the module that does the job (see the list above) and run `npm test`. If `src/example.test.ts` fails
+   too, your change affects `examples/order`: check that the difference is what you meant, then run
+   `UPDATE_EXAMPLES=1 npm test` and review `git diff examples`.
+
+libxml2 isn't always right. It accepts an element with `maxOccurs="0"`, for example, which XML Schema forbids. When
+the specification is clear and libxml2 disagrees, test the case in `src/convert.test.ts` and say why in a comment.
 
 ## Tests
 
@@ -83,7 +165,15 @@ leading zeros, so the cases stay away from those.
 ## Adding support for another XML Schema feature
 
 1. Add a case to `src/differential.test.ts` with documents the XML Schema accepts and documents it rejects.
-2. Implement the feature, usually in `src/emitter.ts` or `src/simple-types.ts`.
+2. Implement the feature, usually in `src/emitter.ts`, `src/content-model.ts` or `src/simple-types.ts`.
 3. If JSON Schema can only express part of it, report a problem with a new code. Add the code to `PROBLEM_CODES` in
    `src/problems.ts` and explain it in [output.md](output.md#problems); `src/problems.test.ts` checks both.
 4. Describe the output in [output.md](output.md) and add a line to the changelog.
+
+## Keeping dependencies up to date
+
+On GitHub, Dependabot ([`.github/dependabot.yml`](../.github/dependabot.yml)) opens pull requests once a week: one
+for the minor and patch updates of the development dependencies, and one for each major update, each update of
+`@xmldom/xmldom` and each GitHub Action. CI runs the full check on every one of them, so merge when it's green. A
+major update of TypeScript, ESLint or Vitest can need a change to the configuration; the release notes of the
+package say what changed.

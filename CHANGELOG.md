@@ -9,6 +9,8 @@ The first version.
   [docs/output.md](docs/output.md) describes what they write.
 - Choices become exclusive `oneOf` branches, objects are closed, derived types are merged with their base, and
   patterns are translated to JavaScript.
+- Every problem has a code from a fixed list, exported as the type `ProblemCode` and explained in
+  [docs/output.md](docs/output.md#problems).
 - An ES module for Node.js 22.12 or later; the main entry point runs in browsers too. The only runtime dependency is
   `@xmldom/xmldom`.
 - `examples/order`, an order schema split over three files.

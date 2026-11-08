@@ -179,5 +179,7 @@ If the entry file can't be read or no root element is found, `schema` is `undefi
   XML parser would collapse.
 - `xs:list`, `xs:union`, `xs:any`, mixed content and `xs:redefine` aren't converted (see above). Identity
   constraints (`xs:key`, `xs:keyref`, `xs:unique`) are ignored.
+- `xs:long` gets no bounds and `xs:unsignedLong` only its minimum of 0. Their limits lie beyond 2<sup>53</sup>, where
+  JavaScript numbers stop being exact, so a validator like Ajv couldn't check them reliably.
 - Ajv in strict mode complains about choice branches (`strictRequired`), because a branch requires properties it
   doesn't define itself. The schema is still valid JSON Schema; set `strictRequired: false`.

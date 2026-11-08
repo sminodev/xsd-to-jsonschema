@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { run, USAGE, type Io } from './cli.js';
+import type { JsonSchema } from './json-schema.js';
 import { convertFile } from './node.js';
 
 const XS = 'xmlns:xs="http://www.w3.org/2001/XMLSchema"';
@@ -50,7 +51,7 @@ describe('convertFile and the command line', () => {
   it('writes the schema to stdout and the problems to stderr', () => {
     const { out, io } = capture();
     expect(run([main, '--root', 'A'], io)).toBe(0);
-    expect(JSON.parse(out.stdout).xml).toEqual({ name: 'A', namespace: 'urn:t' });
+    expect((JSON.parse(out.stdout) as JsonSchema).xml).toEqual({ name: 'A', namespace: 'urn:t' });
     expect(out.stderr).toBe('');
   });
 
@@ -87,7 +88,7 @@ describe('convertFile and the command line', () => {
   it('writes to a file with --out and leaves out the xml annotations with --no-xml', () => {
     const { out, io } = capture();
     expect(run([main, '--root', 'A', '--no-xml', '--out', 'out.json'], io)).toBe(0);
-    expect(JSON.parse(out.files['out.json'] ?? '{}').xml).toBeUndefined();
+    expect((JSON.parse(out.files['out.json'] ?? '{}') as JsonSchema).xml).toBeUndefined();
   });
 
   it('prints the help', () => {

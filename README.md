@@ -226,7 +226,8 @@ each of them shows up in `problems`.
 npm ci
 npm run build                # compiles src/ to dist/
 npm test                     # runs all tests, including the example
-npm run lint                 # ESLint, plus npm run typecheck and npm run format:check
+npm run lint                 # ESLint
+npm run typecheck            # TypeScript, without writing files
 npm run example              # builds and prints the schema for examples/order
 UPDATE_EXAMPLES=1 npm test   # updates order.schema.json and order.json after an intended change
 ```
