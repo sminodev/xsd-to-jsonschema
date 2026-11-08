@@ -18,6 +18,12 @@ describe('paths', () => {
     expect(resolvePath('dir/a.xsd', 'sub/./b.xsd')).toBe('dir/sub/b.xsd');
     expect(resolvePath('a.xsd', '../b.xsd')).toBe('../b.xsd');
     expect(resolvePath('dir/a.xsd', '..\\types\\b.xsd')).toBe('types/b.xsd');
+  });
+
+  it('keep absolute URIs and resolve relative paths against them', () => {
+    expect(resolvePath('dir/a.xsd', 'http://example.org/s/b.xsd')).toBe('http://example.org/s/b.xsd');
+    expect(resolvePath('http://example.org/s/b.xsd', '../t/c.xsd')).toBe('http://example.org/t/c.xsd');
+    expect(normalizePath('https://example.org/s/b.xsd')).toBe('https://example.org/s/b.xsd');
     expect(normalizePath('/x/../y/z.xsd')).toBe('/y/z.xsd');
   });
 });
@@ -58,6 +64,23 @@ describe('SchemaSet', () => {
     );
     expect(problems.map((p) => p.code)).toEqual(['missing-file', 'invalid-xml', 'not-a-schema', 'duplicate-component']);
     expect(problems[0]).toMatchObject({ file: 'a.xsd', line: 2, message: 'schema document gone.xsd not found' });
+  });
+
+  it('reports an include into another target namespace and xs:redefine, which it does not apply', () => {
+    const { problems } = load(
+      {
+        'a.xsd': `<xs:schema ${XS} targetNamespace="urn:a">
+          <xs:include schemaLocation="plain.xsd"/>
+          <xs:redefine schemaLocation="plain.xsd"/>
+        </xs:schema>`,
+        'plain.xsd': `<xs:schema ${XS}><xs:simpleType name="T"/></xs:schema>`,
+      },
+      'a.xsd',
+    );
+    expect(problems).toEqual([
+      expect.objectContaining({ code: 'unsupported-include', line: 2 }),
+      expect.objectContaining({ code: 'unsupported-redefine', line: 3 }),
+    ]);
   });
 
   it('resolves QNames with the namespaces in scope, including the default namespace', () => {

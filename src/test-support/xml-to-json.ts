@@ -2,7 +2,7 @@
 // annotations and the JSON types. Anything the schema has no place for is kept under a key the schema rejects
 // (`#unknown:...`), so the JSON fails validation wherever the XML has something the schema does not describe.
 
-import { DOMParser, type Element, type Node } from '@xmldom/xmldom';
+import { DOMParser, type Element, type Node, XMLSerializer } from '@xmldom/xmldom';
 import type { JsonSchema } from '../json-schema.js';
 
 const XSI = 'http://www.w3.org/2001/XMLSchema-instance';
@@ -84,6 +84,18 @@ export function xmlToJson(schema: JsonSchema, text: string): Json {
       }
     }
     const textProp = entries.find(([, p]) => p.xml?.text);
+    if (textProp?.[1].xml?.mixed) {
+      // mixed content: the text and the child elements, as markup, without the namespace declarations the serializer
+      // adds for namespaces already in scope
+      const serializer = new XMLSerializer();
+      out[textProp[0]] = [...node.childNodes]
+        .map((child) => serializer.serializeToString(child))
+        .join('')
+        .replace(/ xmlns(?::([\w.-]+))?="([^"]*)"/g, (declaration, prefix: string | undefined, uri: string) =>
+          node.lookupNamespaceURI(prefix ?? '') === uri ? '' : declaration,
+        );
+      return out;
+    }
     let text = '';
     for (const child of [...node.childNodes]) {
       if (child.nodeType === 3 || child.nodeType === 4) {

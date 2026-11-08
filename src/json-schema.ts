@@ -8,6 +8,8 @@ export interface XmlAnnotation {
   attribute?: boolean;
   /** the property holds the text of an element with simple content */
   text?: boolean;
+  /** the text property holds mixed content: text and child elements, as XML markup */
+  mixed?: boolean;
 }
 
 export type JsonType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array';
@@ -40,6 +42,7 @@ export interface JsonSchema {
   additionalProperties?: boolean;
   dependentRequired?: Record<string, string[]>;
   oneOf?: JsonSchema[];
+  anyOf?: JsonSchema[];
   allOf?: JsonSchema[];
   xml?: XmlAnnotation;
 }

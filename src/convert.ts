@@ -5,9 +5,9 @@ import { clark, type Component, type SchemaDocument, SchemaSet, type SchemaSourc
 
 export interface ConvertOptions {
   /**
-   * `format` writes xs:date, xs:dateTime, xs:time and xs:duration as JSON Schema `format` (RFC 3339, which needs a
-   * time zone in date-times); `pattern` writes the XML Schema format, where the time zone is optional.
-   * Default: `format`.
+   * `pattern` writes xs:date, xs:dateTime, xs:time and xs:duration as a pattern of the XML Schema format, where the
+   * time zone is optional; `format` writes JSON Schema `format` (RFC 3339, which needs a time zone in date-times).
+   * Default: `pattern`.
    */
   dateTime?: 'format' | 'pattern' | undefined;
   /** Add the `xml` annotations (namespace, attribute, text). Default: true. */
@@ -39,7 +39,7 @@ export interface ConvertResult {
 /** Converts the XML Schema of one root element into a JSON Schema 2020-12 document. */
 export function convert({ files, entry, root, options = {} }: ConvertInput): ConvertResult {
   const settings: EmitterOptions = {
-    dateTime: options.dateTime ?? 'format',
+    dateTime: options.dateTime ?? 'pattern',
     xml: options.xml ?? true,
     textProperty: options.textProperty ?? 'value',
   };
@@ -75,11 +75,11 @@ function findRoot(
   let id: string;
   if (root === undefined) {
     if (candidates.length !== 1 || candidates[0] === undefined) {
-      problems.error(
-        'root-required',
-        `${doc.path} declares ${candidates.length} global elements; choose one with root: ${candidates.join(', ')}`,
-        { file: doc.path },
-      );
+      const message =
+        candidates.length === 0
+          ? `${doc.path} declares no global element; choose the document that declares the root element as entry`
+          : `${doc.path} declares ${candidates.length} global elements; choose one with root: ${candidates.join(', ')}`;
+      problems.error('root-required', message, { file: doc.path });
       return undefined;
     }
     id = candidates[0];

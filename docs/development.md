@@ -157,7 +157,8 @@ and says which is which. Every document is then validated twice:
 
 1. as XML, against the XML Schema, with libxml2 ([xmllint-wasm](https://www.npmjs.com/package/xmllint-wasm));
 2. as JSON, against the generated schema, with [Ajv](https://ajv.js.org). `src/test-support/xml-to-json.ts` turns
-   the XML into JSON using nothing but the generated schema.
+   the XML into JSON using nothing but the generated schema. Ajv checks `multipleOf` on the decimal form of a number
+   there, since its own check divides binary floating point numbers and gets 1.12 / 0.01 wrong.
 
 Both validators have to agree. They can't agree on the order of elements or on details of the XML text such as
 leading zeros, so the cases stay away from those.

@@ -78,17 +78,36 @@ export function clark(ns: string, local: string): string {
   return `{${ns}}${local}`;
 }
 
+/** An absolute URI such as `https://example.org/a.xsd`. One-letter schemes are left out: they are drive letters. */
+export function isAbsoluteUri(path: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(path);
+}
+
 /**
  * Joins a relative path to the directory of `from` and normalizes `.` and `..`, with `/` as separator. Backslashes in
- * `relative` count as `/`, as schemas written on Windows sometimes use them in schemaLocation.
+ * `relative` count as `/`, as schemas written on Windows sometimes use them in schemaLocation. An absolute URI stays
+ * as it is, and a relative path is resolved against `from` if that is a URI.
  */
 export function resolvePath(from: string, relative: string): string {
   relative = relative.replace(/\\/g, '/');
+  if (isAbsoluteUri(relative)) {
+    return relative;
+  }
+  if (isAbsoluteUri(from)) {
+    try {
+      return new URL(relative, from).href;
+    } catch {
+      return relative;
+    }
+  }
   const base = from.includes('/') ? from.slice(0, from.lastIndexOf('/') + 1) : '';
   return normalizePath(relative.startsWith('/') ? relative : base + relative);
 }
 
 export function normalizePath(path: string): string {
+  if (isAbsoluteUri(path)) {
+    return path;
+  }
   const out: string[] = [];
   for (const segment of path.split('/')) {
     if (segment === '..' && out.length > 0 && out[out.length - 1] !== '..') {
