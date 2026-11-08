@@ -1,6 +1,6 @@
 {
   "name": "xsd-to-jsonschema",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Converts XML Schemas into JSON Schema 2020-12.",
   "scripts": {
     "test": "vitest run",
