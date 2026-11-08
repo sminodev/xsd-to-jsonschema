@@ -1,16 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Order xmlns="urn:example:order" xmlns:c="urn:example:common" version="1.0">
+<Order xmlns="urn:example:order" xmlns:c="urn:example:common" version="1.0" created="2026-11-04T09:30:00">
   <Title>Order 1</Title>
   <CustomerRef>C-7</CustomerRef>
   <Express>false</Express>
   <Level>0</Level>
   <DeliveryDate>2026-11-20</DeliveryDate>
+  <Wanted>2026-11</Wanted>
+  <c:Note>Please ring <c:b>twice</c:b>.</c:Note>
+  <DiscountCode>AUTUMN</DiscountCode>
+  <DiscountPercent>10</DiscountPercent>
   <Contact>
+    <c:Name>Paper Shop</c:Name>
     <c:Email>orders@example.com</c:Email>
   </Contact>
   <Line>
     <Item>Paper</Item>
     <Quantity>2</Quantity>
+    <Price currency="EUR">4.99</Price>
     <Tag>A4</Tag>
     <Packaging>
       <Box>M</Box>

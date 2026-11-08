@@ -1,17 +1,29 @@
 {
   "version": "1.0",
+  "created": "2026-11-04T09:30:00",
   "Title": "Order 1",
   "CustomerRef": "C-7",
   "Express": false,
   "Level": 0,
   "DeliveryDate": "2026-11-20",
+  "Wanted": "2026-11",
+  "Note": {
+    "value": "Please ring <c:b>twice</c:b>."
+  },
+  "DiscountCode": "AUTUMN",
+  "DiscountPercent": 10,
   "Contact": {
+    "Name": "Paper Shop",
     "Email": "orders@example.com"
   },
   "Line": [
     {
       "Item": "Paper",
       "Quantity": 2,
+      "Price": {
+        "currency": "EUR",
+        "value": 4.99
+      },
       "Tag": [
         "A4"
       ],

@@ -3,12 +3,13 @@
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            xmlns="urn:example:order" xmlns:c="urn:example:common"
            targetNamespace="urn:example:order" elementFormDefault="qualified">
-  <xs:import namespace="urn:example:common" schemaLocation="common.xsd"/>
+  <xs:import namespace="urn:example:common" schemaLocation="common/common.xsd"/>
 
   <xs:complexType name="Line">
     <xs:sequence>
       <xs:element name="Item" type="c:Text40"/>
       <xs:element name="Quantity" type="xs:positiveInteger"/>
+      <xs:element name="Price" type="c:Price" minOccurs="0"/>
       <xs:element name="Tag" type="xs:string" minOccurs="0" maxOccurs="3"/>
       <xs:element name="Packaging" minOccurs="0">
         <xs:complexType>

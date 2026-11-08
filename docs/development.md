@@ -83,17 +83,19 @@ If something has no JSON Schema equivalent, the converter writes the closest sch
 [`examples/order`](../examples/order) is a good way to see the modules work together. `npm run example` prints the
 result.
 
-1. `SchemaSet.load('order.xsd')` reads `order.xsd`, follows its import of `common.xsd` and its include of `line.xsd`,
-   and indexes the global components of all three: the element `Order`, the complex types `Line` and `Contact`, the
-   simple types `Text40`, `ServiceLevel` and so on.
-2. `order.xsd` declares one global element, so `Order` is the root without a `root` option.
+1. `SchemaSet.load('order.xsd')` reads `order.xsd`, follows its import of `common/common.xsd` and its include of
+   `line.xsd`, and indexes the global components of all three: the elements `Order` and `c:Note`, the complex types
+   `Line`, `c:Contact` and `c:Price`, the group `Delivery`, the attribute group `Tracking`, the simple types and so on.
+2. `order.xsd` declares one global element, so `Order` is the root without a `root` option. (`c:Note` belongs to
+   `common.xsd`.)
 3. `Emitter.root()` sees that `Order` has an anonymous complex type and writes its object in place. `content()` hands
    the `xs:sequence` to `ContentModel`, which goes through the particles one by one:
    - `Title` has the named type `c:Text40`. `typeRef()` asks `Definitions` for a reference and gets
      `{"$ref": "#/$defs/Text40"}`; the definition itself is built later.
    - `CustomerRef` has `minOccurs="0"`, so it becomes a property that isn't required.
-   - The `xs:choice` between `Pickup` and the sequence `DeliveryDate`, `DeliveryTime` turns into a fragment with all
-     three properties and one `oneOf`. Each branch requires its own properties and sets the others to `false`:
+   - The `xs:choice` between `Pickup` and the group `Delivery` (`DeliveryDate`, `DeliveryTime`) turns into a fragment
+     with all three properties and one `oneOf`. Each branch requires its own properties and sets the others to
+     `false`:
 
      ```json
      "oneOf": [
@@ -102,13 +104,19 @@ result.
      ]
      ```
 
+   - The optional sequence of `DiscountCode` and `DiscountPercent` adds two optional properties and a
+     `dependentRequired` that ties them together.
    - `Line` has `maxOccurs="5"`, so it becomes an array with `minItems` 1 and `maxItems` 5.
+   - `xs:any` inside `Extensions` marks that fragment as open, so its object gets no `additionalProperties: false`.
 
-4. `complexType()` writes the object: the attribute `version` first (its `fixed` value becomes `const`), then the
-   properties of the fragment in document order, `required`, `additionalProperties: false`, and the `oneOf`. With two
-   choices in one object it would write an `allOf` of two `oneOf`s.
-5. `Definitions.buildAll()` builds the referenced types in the order they were first used: `Text40`,
-   `ServiceLevel`, `Contact`, `Line`, and then `Email`, `BoxSize` and `Kilogram`, which `Contact` and `Line` refer to.
+4. `complexType()` writes the object: the attributes first (`version`, whose `fixed` value becomes `const`, then
+   `created` and `channel` from the attribute group), then the properties of the fragment in document order,
+   `required`, `additionalProperties: false`, `dependentRequired` and the `oneOf`. With two choices in one object it
+   would write an `allOf` of two `oneOf`s.
+5. `Definitions.buildAll()` builds the referenced types in the order they were first used: the element types from
+   `Text40` to `Line`, then `Channel`, which only an attribute uses, and then the types that the definitions refer to,
+   such as `Email` from `Contact` and `Price` from `Line`. `c:Price` restricts `c:Amount` and only makes `currency`
+   required, so it is written as one object; `Amount` itself is never referenced and stays out.
 
 ## Finding out why a schema looks wrong
 
@@ -169,7 +177,15 @@ leading zeros, so the cases stay away from those.
 2. Implement the feature, usually in `src/emitter.ts`, `src/content-model.ts` or `src/simple-types.ts`.
 3. If JSON Schema can only express part of it, report a problem with a new code. Add the code to `PROBLEM_CODES` in
    `src/problems.ts` and explain it in [output.md](output.md#problems); `src/problems.test.ts` checks both.
-4. Describe the output in [output.md](output.md) and add a line to the changelog.
+4. Describe the output in [output.md](output.md). The changelog is written from the commit messages, so give a
+   change that users notice a `feat:` or `fix:` message.
+
+## Pull requests
+
+Keep a pull request to one change, with a test that fails without it: a differential case if libxml2 can judge it,
+otherwise a case in the unit tests. CI runs `npm run typecheck`, `npm run lint`, `npm run format:check`,
+`npm run build` and `npm test` on Node.js 22.12 and 24; run them before you push. If the output changes, update
+[output.md](output.md) in the same pull request.
 
 ## Keeping dependencies up to date
 

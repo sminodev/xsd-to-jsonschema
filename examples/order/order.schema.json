@@ -10,6 +10,20 @@
         "attribute": true
       }
     },
+    "created": {
+      "type": "string",
+      "pattern": "^(?:(?:-?(?:[1-9][0-9]{3,}|0[0-9]{2}[1-9]|0[0-9][1-9][0-9]|0[1-9][0-9]{2})-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|-?(?:[1-9][0-9]*(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)|[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29)T(?:(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?|(?:24:00:00(?:\\.0+)?))(?:Z|(?:\\+|-)(?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?)$",
+      "xml": {
+        "attribute": true
+      }
+    },
+    "channel": {
+      "$ref": "#/$defs/Channel",
+      "default": "web",
+      "xml": {
+        "attribute": true
+      }
+    },
     "Title": {
       "$ref": "#/$defs/Text40",
       "xml": {
@@ -56,6 +70,12 @@
         "namespace": "urn:example:order"
       }
     },
+    "Wanted": {
+      "$ref": "#/$defs/PartialDate",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
     "Packages": {
       "type": "integer",
       "minimum": 1,
@@ -64,9 +84,21 @@
         "namespace": "urn:example:order"
       }
     },
-    "Notes": {
+    "Note": {
+      "description": "Free text that may mark words as bold or italic.",
+      "$ref": "#/$defs/Note",
+      "xml": {
+        "namespace": "urn:example:common"
+      }
+    },
+    "DiscountCode": {
       "type": "string",
-      "maxLength": 500,
+      "xml": {
+        "namespace": "urn:example:order"
+      }
+    },
+    "DiscountPercent": {
+      "$ref": "#/$defs/Percent",
       "xml": {
         "namespace": "urn:example:order"
       }
@@ -94,14 +126,30 @@
       "xml": {
         "namespace": "urn:example:order"
       }
+    },
+    "Extensions": {
+      "description": "Data of other systems, in their own namespaces.",
+      "type": "object",
+      "xml": {
+        "namespace": "urn:example:order"
+      }
     }
   },
   "required": [
+    "created",
     "Title",
     "Express",
     "Line"
   ],
   "additionalProperties": false,
+  "dependentRequired": {
+    "DiscountCode": [
+      "DiscountPercent"
+    ],
+    "DiscountPercent": [
+      "DiscountCode"
+    ]
+  },
   "oneOf": [
     {
       "required": [
@@ -139,9 +187,51 @@
         2
       ]
     },
+    "PartialDate": {
+      "description": "A month or a day.",
+      "type": "string",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(?:-?(?:[1-9][0-9]{3,}|0[0-9]{2}[1-9]|0[0-9][1-9][0-9]|0[1-9][0-9]{2})-(?:0[1-9]|1[0-2])(?:Z|(?:\\+|-)(?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?)$"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?:(?:-?(?:[1-9][0-9]{3,}|0[0-9]{2}[1-9]|0[0-9][1-9][0-9]|0[1-9][0-9]{2})-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|-?(?:[1-9][0-9]*(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)|[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29)(?:Z|(?:\\+|-)(?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?)$"
+        }
+      ]
+    },
+    "Note": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string",
+          "xml": {
+            "text": true,
+            "mixed": true
+          }
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "Percent": {
+      "type": "number",
+      "multipleOf": 0.1,
+      "minimum": 0,
+      "maximum": 100
+    },
     "Contact": {
       "type": "object",
       "properties": {
+        "Name": {
+          "$ref": "#/$defs/Text40",
+          "xml": {
+            "namespace": "urn:example:common"
+          }
+        },
         "Email": {
           "$ref": "#/$defs/Email",
           "xml": {
@@ -156,6 +246,7 @@
         }
       },
       "required": [
+        "Name",
         "Email"
       ],
       "additionalProperties": false
@@ -172,6 +263,12 @@
         "Quantity": {
           "type": "integer",
           "minimum": 1,
+          "xml": {
+            "namespace": "urn:example:order"
+          }
+        },
+        "Price": {
+          "$ref": "#/$defs/Price",
           "xml": {
             "namespace": "urn:example:order"
           }
@@ -217,9 +314,40 @@
       ],
       "additionalProperties": false
     },
+    "Channel": {
+      "type": "string",
+      "enum": [
+        "web",
+        "phone",
+        "mail"
+      ]
+    },
     "Email": {
       "type": "string",
       "pattern": "^(?:[^@ ]+@[^@ ]+)$"
+    },
+    "Price": {
+      "description": "An amount that always says its currency.",
+      "type": "object",
+      "properties": {
+        "currency": {
+          "$ref": "#/$defs/Currency",
+          "xml": {
+            "attribute": true
+          }
+        },
+        "value": {
+          "type": "number",
+          "xml": {
+            "text": true
+          }
+        }
+      },
+      "required": [
+        "currency",
+        "value"
+      ],
+      "additionalProperties": false
     },
     "BoxSize": {
       "type": "string",
@@ -233,6 +361,10 @@
       "type": "number",
       "multipleOf": 0.01,
       "exclusiveMinimum": 0
+    },
+    "Currency": {
+      "type": "string",
+      "pattern": "^(?:[A-Z]{3})$"
     }
   }
 }
