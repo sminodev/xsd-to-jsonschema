@@ -1,11 +1,10 @@
 # xsd-to-jsonschema
 
-Turn an XML Schema into a JSON Schema.
+`xsd-to-jsonschema` converts XSD files to JSON Schema Draft 2020-12. It resolves imports and includes to generate
+a schema for a selected root element, with a CLI and library APIs for Node.js and browsers.
 
-If your data is described by XSD files but travels as JSON, you still want to validate that JSON. xsd-to-jsonschema
-reads your XML Schema 1.0 files, follows their imports and includes, and writes a JSON Schema 2020-12 for the root
-element you pick. It converts schemas, not documents: [docs/output.md](docs/output.md) describes the JSON form the
-schema expects, and where it can't match the XML Schema exactly, the converter tells you.
+It converts schema definitions, not XML documents. The [output documentation](docs/output.md) describes the expected
+JSON representation and supported XSD constructs.
 
 ## Install
 
@@ -13,12 +12,99 @@ schema expects, and where it can't match the XML Schema exactly, the converter t
 npm install xsd-to-jsonschema
 ```
 
-Requires Node.js 22.12 or later. The package is an ES module; `require()` works too, since Node.js 22.12 can load
-ES modules that way.
+Node.js 22.12 or later is required. The package is an ES module, but `require()` is also supported on that runtime.
+
+## Quick start
+
+For local files, `convertFile` loads the entry XSD together with its imports and includes:
+
+```js
+import { convertFile } from 'xsd-to-jsonschema/node';
+
+const { schema, problems } = convertFile('order.xsd');
+
+for (const problem of problems) {
+  console.error(problem);
+}
+
+if (schema === undefined || problems.some((problem) => problem.severity === 'error')) {
+  throw new Error('Could not convert order.xsd. See the problems above.');
+}
+
+console.log(JSON.stringify(schema, null, 2));
+```
+
+Because a conversion can return `schema` alongside errors, check `problems` before using the result. If the entry
+file can't be read or no root element is found, `schema` is `undefined`. The problem codes are listed under
+[Diagnostics](docs/output.md#problems).
+
+Alternatively, use the CLI:
+
+```sh
+npx xsd-to-jsonschema order.xsd --out order.schema.json
+```
+
+`xsd2json` is an alias for the same command. Diagnostics go to stderr; the schema goes to stdout or `--out`.
+
+| Exit code | Meaning                                                        |
+| --------- | -------------------------------------------------------------- |
+| `0`       | Schema written without errors.                                 |
+| `1`       | Schema written with errors, or with warnings under `--strict`. |
+| `2`       | No schema written.                                             |
+
+Run `npx xsd-to-jsonschema --help` for all options. To validate JSON against the result, see the
+[Ajv example](docs/validation.md).
+
+## Usage
+
+### Schema texts and custom loaders
+
+For already loaded schemas, including in browser applications, `convert` accepts the XSD texts as strings keyed
+by path:
+
+```js
+import { convert } from 'xsd-to-jsonschema';
+
+const { schema, problems } = convert({
+  files: { 'order.xsd': orderXsd, 'line.xsd': lineXsd, 'common/common.xsd': commonXsd },
+  entry: 'order.xsd',
+});
+```
+
+In this example, `orderXsd`, `lineXsd` and `commonXsd` contain the corresponding XSD documents.
+
+Alternatively, `files` can be a loader function that receives a path and returns the schema text. Absolute import
+URLs reach the function unchanged, allowing it to supply cached or local copies. In contrast, `convertFile` reads
+only local files and reports remote imports as `missing-file`.
+
+### Root and options
+
+An explicit `root` selects a global element from any loaded schema, including imports and includes. Without it,
+the entry schema must declare exactly one global element.
+
+Root names can be local (`Order`), prefixed (`prefix:Order`) or expanded (`{urn:example:order}Order`). Prefixes are
+resolved in the entry schema.
+
+```js
+const { schema, problems } = convertFile('order.xsd', {
+  root: 'Order',
+  options: { dateTime: 'format' },
+});
+```
+
+| Setting                | CLI flag                 | Default                                | Description                                                       |
+| ---------------------- | ------------------------ | -------------------------------------- | ----------------------------------------------------------------- |
+| `root`                 | `--root <name>`          | The entry schema's only global element | Root element to convert; required if the choice is ambiguous.     |
+| `options.dateTime`     | `--date-time <mode>`     | `pattern`                              | Use XML Schema date/time patterns or JSON Schema `format` values. |
+| `options.xml`          | `--no-xml`               | `true`                                 | Include the `xml` annotations.                                    |
+| `options.textProperty` | `--text-property <name>` | `value`                                | Property for the text of an element with simple content.          |
+
+With `dateTime: 'format'`, make sure your validator is configured to validate formats. The accepted date and time
+forms differ from XML Schema; see [Dates and times](docs/output.md#dates-and-times).
 
 ## Example: a multi-file order schema
 
-[`examples/order`](examples/order) splits an order schema over three files in two folders:
+The order example combines three XSD files with XML and JSON sample documents:
 
 ```text
 examples/order/
@@ -30,20 +116,28 @@ examples/order/
 └── order.json           the same order as JSON
 ```
 
-The schema is small, but it uses what enterprise schemas use: a choice between `Pickup` and a delivery group, an
-attribute group, a type that extends another one, an amount whose currency is an attribute, a contact from another
-namespace, an optional sequence, a union of a month and a day, a note with mixed content, an extension point for data
-of other systems, repeated elements, enumerations, patterns, fixed and default values and decimal places. It nests
-four levels deep (`Order` → `Line` → `Packaging` → `Weight`). In a clone of this repository, this builds the package
-and prints the schema:
+The schemas demonstrate imports, includes, inheritance, choices, repeated elements and value constraints.
+
+After installing the dependencies with `npm ci`, build and run the example:
 
 ```sh
 npm run example
 ```
 
-It runs `xsd-to-jsonschema examples/order/order.xsd`. You don't need `--root Order` here, because `order.xsd` declares
-only one global element. Here is part of the result (the full file is
-[`order.schema.json`](examples/order/order.schema.json)):
+`Order` is the entry file's only global element, so no `--root` option is needed.
+
+The [generated schema](examples/order/order.schema.json) includes:
+
+- `oneOf` for the choice between pickup and delivery.
+- `dependentRequired` for the optional pair `DiscountCode` and `DiscountPercent`.
+- Inherited properties in `Contact` and a required `currency` in `Price`.
+- Mixed content in `Note` and a wildcard in `Extensions`, both reported as warnings.
+
+<details>
+<summary>Show the schema excerpt</summary>
+
+This excerpt omits properties and definitions. Use the [complete schema](examples/order/order.schema.json) for
+validation.
 
 ```json
 {
@@ -124,21 +218,12 @@ only one global element. Here is part of the result (the full file is
 }
 ```
 
-The excerpt leaves out the attribute `created`, the elements `CustomerRef`, `Level`, `DeliveryDate`, `DeliveryTime`,
-`Packages` and `Attachment`, and most definitions; the patterns for dates and times are long. A few things to note:
+</details>
 
-- The properties keep the order of the XML Schema, attributes first.
-- The `oneOf` keeps `Pickup` and the delivery date apart, so an order has one or the other, but not both.
-- `dependentRequired` says that `DiscountCode` and `DiscountPercent` come together or not at all.
-- `Contact` has the `Name` of the type it extends; `Price` requires the `currency` that is optional in `Amount`.
-- `Note` keeps its markup as a string, and `Extensions` accepts any content (`xs:any`). Both are reported as warnings
-  in `problems`, since the JSON Schema doesn't check what's inside.
+<details>
+<summary>Compare the XML document with its JSON form</summary>
 
-Here is `order.xml` next to its JSON form:
-
-<table>
-<tr><th><code>order.xml</code></th><th><code>order.json</code></th></tr>
-<tr><td>
+[`order.xml`](examples/order/order.xml):
 
 ```xml
 <Order xmlns="urn:example:order" xmlns:c="urn:example:common" version="1.0" created="2026-11-04T09:30:00">
@@ -172,7 +257,7 @@ Here is `order.xml` next to its JSON form:
 </Order>
 ```
 
-</td><td>
+[`order.json`](examples/order/order.json):
 
 ```json
 {
@@ -201,94 +286,34 @@ Here is `order.xml` next to its JSON form:
 }
 ```
 
-</td></tr>
-</table>
+Tests validate `order.xml` against the XSD and `order.json` against the generated schema.
 
-The tests keep both honest: `order.xml` has to be valid against the XML Schema, and `order.json` against the
-generated schema.
-
-## Usage
-
-In Node.js, `convertFile` reads the entry schema and everything it imports or includes from disk:
-
-```js
-import { convertFile } from 'xsd-to-jsonschema/node';
-
-const { schema, problems } = convertFile('examples/order/order.xsd');
-```
-
-`convert` takes the schema texts instead, keyed by path. It doesn't touch the file system, so it runs in the browser,
-too:
-
-```js
-import { convert } from 'xsd-to-jsonschema';
-
-const { schema, problems } = convert({
-  files: { 'order.xsd': orderXsd, 'line.xsd': lineXsd, 'common/common.xsd': commonXsd },
-  entry: 'order.xsd',
-});
-```
-
-`files` can also be a function that gets a path and returns the text. It gets an import by absolute URL, such as
-`https://www.w3.org/TR/xmldsig-core/xmldsig-core-schema.xsd`, exactly as written, so it can hand over a local copy.
-`convertFile` downloads nothing and reports such an import as `missing-file`.
-
-Once the package is installed, the command line does the same: `npx xsd-to-jsonschema order.xsd --out
-order.schema.json`, and `--help` lists its options.
-
-If the entry schema declares more than one global element, pick one with `root`: `Order`, `prefix:Order` and
-`{urn:example:order}Order` all work. The other options go into `options`:
-
-```js
-const { schema, problems } = convertFile('order.xsd', { root: 'Order', options: { dateTime: 'format' } });
-```
-
-`problems` tells you where the JSON Schema can't express the XML Schema exactly, with a code, the file and the line
-([all codes](docs/output.md#problems)).
-
-| Option         | CLI flag                 | Default   | Description                                                                                                       |
-| -------------- | ------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
-| `root`         | `--root <name>`          |           | the root element to convert                                                                                       |
-| `dateTime`     | `--date-time <mode>`     | `pattern` | dates and times as `pattern` (XML Schema format, time zone optional) or `format` (JSON Schema `format`, RFC 3339) |
-| `xml`          | `--no-xml`               | `true`    | add the `xml` annotations                                                                                         |
-| `textProperty` | `--text-property <name>` | `value`   | the property that holds the text of an element with simple content                                                |
+</details>
 
 ## Output
 
-The generated schema describes the content of the root element. In short (the details are in
-[docs/output.md](docs/output.md)):
+The root element's content is the top-level JSON value, without a root-name wrapper. Elements and attributes use
+local names, repeated elements become arrays, and named types are stored in `$defs`.
 
-- Elements and attributes become properties named after their local names: attributes first, then elements in the
-  order of the XML Schema. Objects are closed (`additionalProperties: false`), unless `xs:any` or `xs:anyAttribute`
-  allow other content there.
-- Named types end up in `$defs`. A derived type is merged with its base, so you get one schema instead of a chain.
-- A repeated element becomes an array with `minItems` and `maxItems`.
-- A choice becomes a `oneOf`. Each branch requires its own properties and rules out those of the other branches.
-- `fixed` values become `const` and `default` values stay `default`, both with the JSON type of the declared type:
-  `fixed="1"` on an integer becomes `1`, not `"1"`.
-- Patterns are anchored and translated to the regex flavor JSON Schema uses.
-- The `xml` annotation records the XML side (namespace, attribute, text, mixed content), so you can map a document
-  between XML and JSON. Validators ignore it or need it registered (Ajv: `ajv.addKeyword('xml')`).
-
-Two things can't be checked in JSON: the order of elements, since JSON objects have none, and details of the XML
-text such as leading zeros in a number. `xs:list`, substitution groups and identity constraints aren't supported,
-and the content of `xs:any` and of mixed content isn't checked; where a schema uses them, they show up in `problems`.
-[docs/output.md](docs/output.md#limits) lists all limits.
+See [Output format](docs/output.md) for the mappings, [limits](docs/output.md#limits) for unsupported behavior, and
+[Validating with Ajv](docs/validation.md) for validator setup.
 
 ## Development
 
+To build and check a repository checkout:
+
 ```sh
 npm ci
-npm run build                # compiles src/ to dist/
-npm test                     # runs all tests, including the example
-npm run lint                 # ESLint
-npm run typecheck            # TypeScript, without writing files
-npm run example              # builds and prints the schema for examples/order
-UPDATE_EXAMPLES=1 npm test   # updates order.schema.json and order.json after an intended change
+npm run build
+npm test
+npm run lint
+npm run lint:fix
+npm run typecheck
 ```
 
-[docs/development.md](docs/development.md) explains how the converter and its tests work, and
-[CONTRIBUTING.md](CONTRIBUTING.md) what a pull request needs.
+The [development guide](docs/development.md) explains the code structure and tests, while
+[CONTRIBUTING.md](CONTRIBUTING.md) covers pull requests. The project is not yet published; see
+[Releases](docs/development.md#releases) for the publishing procedure.
 
 ## License
 

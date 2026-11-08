@@ -29,6 +29,19 @@ describe('paths', () => {
 });
 
 describe('SchemaSet', () => {
+  it('keeps the entry path when a schema is missing or its reader throws', () => {
+    expect(load({}, 'missing.xsd').problems).toEqual([
+      expect.objectContaining({ code: 'missing-file', file: 'missing.xsd' }),
+    ]);
+    const problems = new Problems();
+    const set = new SchemaSet(() => {
+      throw new Error('EACCES');
+    }, problems);
+    expect(set.load('blocked.xsd')).toBeUndefined();
+    expect(problems.list).toEqual([expect.objectContaining({ code: 'missing-file', file: 'blocked.xsd' })]);
+    expect(problems.list[0]?.message).toContain('EACCES');
+  });
+
   it('follows imports and includes and indexes the global components by expanded name', () => {
     const { set, doc, problems } = load(
       {

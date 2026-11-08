@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/bin.js', 0o755)\"",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "coverage": "vitest run --coverage",
@@ -49,7 +50,9 @@
   "files": [
     "dist",
     "docs",
-    "CHANGELOG.md"
+    "examples/order",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -65,7 +68,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "xsd-to-jsonschema": "dist/bin.js"
+    "xsd-to-jsonschema": "dist/bin.js",
+    "xsd2json": "dist/bin.js"
   },
   "license": "MIT"
 }

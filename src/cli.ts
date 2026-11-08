@@ -6,23 +6,24 @@ import { messageOf } from './problems.js';
 export const USAGE = `Usage: xsd-to-jsonschema <entry.xsd> [options]
 
 Generates a JSON Schema 2020-12 for one root element of an XML Schema.
-Imports and includes are read relative to the entry file.
+Imports and includes are read relative to the importing file.
 
 Options:
   --root <name>          root element: name, prefix:name or {namespace}name
-                         (needed if the entry declares more than one global element)
+                         (without this option, the entry must declare exactly one global element)
   --date-time <mode>     pattern (the XML Schema format, the default) or format (RFC 3339)
   --no-xml               leave out the xml annotations
   --text-property <name> property for the text of elements with simple content (default: value)
   --out <file>           write to a file instead of stdout
-  --strict               exit with 1 if the conversion reports an error
+  --strict               also exit with 1 on warnings
   -h, --help             show this help
 
-Problems are printed to stderr.
+Problems are printed to stderr; the schema goes to stdout or --out.
+No log files are created.
 
 Exit codes:
-  0  schema written
-  1  schema written, but the conversion reported errors (only with --strict)
+  0  schema written without errors (warnings are allowed unless --strict is set)
+  1  schema written, but errors or, with --strict, warnings were reported
   2  no schema written: bad arguments, an unreadable entry schema, a missing or unknown
      root element, or an output file that can't be written`;
 
@@ -38,11 +39,9 @@ const processIo: Io = {
   writeFile: (path, text) => writeFileSync(path, text),
 };
 
-/** Runs the command line with the given arguments and returns the exit code. */
-export function run(argv: string[], io: Io = processIo): number {
-  let parsed;
+function readArguments(argv: string[], io: Io) {
   try {
-    parsed = parseArgs({
+    return parseArgs({
       args: argv,
       allowPositionals: true,
       options: {
@@ -57,6 +56,28 @@ export function run(argv: string[], io: Io = processIo): number {
     });
   } catch (e) {
     io.stderr(`${messageOf(e)}\n\n${USAGE}\n`);
+    return undefined;
+  }
+}
+
+function writeSchema(out: string | undefined, text: string, io: Io): boolean {
+  if (!out) {
+    io.stdout(text);
+    return true;
+  }
+  try {
+    io.writeFile(out, text);
+    return true;
+  } catch (e) {
+    io.stderr(`cannot write ${out}: ${messageOf(e)}\n`);
+    return false;
+  }
+}
+
+/** Runs the command line with the given arguments and returns the exit code. */
+export function run(argv: string[], io: Io = processIo): number {
+  const parsed = readArguments(argv, io);
+  if (!parsed) {
     return 2;
   }
   const { values, positionals } = parsed;
@@ -90,15 +111,8 @@ export function run(argv: string[], io: Io = processIo): number {
     return 2;
   }
   const text = `${JSON.stringify(schema, null, 2)}\n`;
-  if (values.out) {
-    try {
-      io.writeFile(values.out, text);
-    } catch (e) {
-      io.stderr(`cannot write ${values.out}: ${messageOf(e)}\n`);
-      return 2;
-    }
-  } else {
-    io.stdout(text);
+  if (!writeSchema(values.out, text, io)) {
+    return 2;
   }
-  return values.strict && problems.some((p) => p.severity === 'error') ? 1 : 0;
+  return problems.some((p) => p.severity === 'error' || values.strict) ? 1 : 0;
 }

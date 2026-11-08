@@ -55,7 +55,11 @@ describe('convertFile and the command line', () => {
     expect(out.stderr).toBe('');
   });
 
-  it('exits with 1 on errors with --strict, and with 2 when nothing is written', () => {
+  it('exits with 1 on errors even without --strict, and with 2 when nothing is written', () => {
+    const errors = capture();
+    expect(run([main, '--root', 'B'], errors.io)).toBe(1);
+    expect(errors.out.stdout).not.toBe('');
+
     const strict = capture();
     expect(run([main, '--root', 'B', '--strict'], strict.io)).toBe(1);
     expect(strict.out.stderr).toContain('error unsupported-list');
@@ -70,6 +74,24 @@ describe('convertFile and the command line', () => {
     const emptyText = capture();
     expect(run([main, '--root', 'A', '--text-property', ''], emptyText.io)).toBe(2);
     expect(emptyText.out.stderr).toBe('--text-property must not be empty\n');
+  });
+
+  it('only treats warnings as failure with --strict and keeps diagnostics on stderr', () => {
+    const file = join(dir, 'warning.xsd');
+    writeFileSync(
+      file,
+      `<xs:schema ${XS}><xs:element name="A"><xs:complexType>
+        <xs:sequence><xs:any/></xs:sequence>
+      </xs:complexType></xs:element></xs:schema>`,
+    );
+    const normal = capture();
+    expect(run([file], normal.io)).toBe(0);
+    expect(normal.out.stderr).toContain('warning unsupported-any');
+    expect(normal.out.stdout).toMatch(/^\{/);
+    const strict = capture();
+    expect(run([file, '--strict'], strict.io)).toBe(1);
+    expect(strict.out.stderr).toContain('warning unsupported-any');
+    expect(strict.out.stdout).toBe(normal.out.stdout);
   });
 
   it('reads no remote documents and says so', () => {
@@ -92,7 +114,7 @@ describe('convertFile and the command line', () => {
   it('exits with 2 and a message when the entry is a directory or the output cannot be written', () => {
     const directory = capture();
     expect(run([join(dir, 'types'), '--root', 'A'], directory.io)).toBe(2);
-    expect(directory.out.stderr).toMatch(/^error missing-file: schema document types could not be read: EISDIR/);
+    expect(directory.out.stderr).toMatch(/^error missing-file: types: schema document types could not be read: EISDIR/);
 
     const { out, io } = capture();
     io.writeFile = () => {
