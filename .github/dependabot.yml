@@ -1,5 +1,6 @@
 # Weekly pull requests for outdated npm packages and GitHub Actions. Minor and patch updates of the development
-# dependencies come as one pull request; major updates and runtime dependencies come one by one.
+# dependencies come as one pull request; major updates and runtime dependencies come one by one. Vitest and its
+# plugins require each other's exact version, so they always come together.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -7,9 +8,18 @@ updates:
     schedule:
       interval: weekly
     groups:
+      vitest:
+        patterns: [vitest, '@vitest/*']
       development:
         dependency-type: development
         update-types: [minor, patch]
+    ignore:
+      # The types follow the oldest supported Node.js version (engines in package.json).
+      - dependency-name: '@types/node'
+        update-types: [version-update:semver-major]
+      # typescript-eslint does not support TypeScript 7 yet.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
     schedule:
