@@ -1,6 +1,6 @@
 # Development
 
-Development requires Node.js 22.12 or later. The build compiles TypeScript sources to `dist/` with `tsc`;
+Development requires Node.js 22.13 or later. The build compiles TypeScript sources to `dist/` with `tsc`;
 at runtime, the package depends only on `@xmldom/xmldom`.
 
 ```sh
@@ -188,7 +188,7 @@ Both validators must agree with the expected result. Test cases must also accoun
 
 ## Pull requests
 
-Run these checks before submitting a pull request. CI runs the same checks on Node.js 22.12 and 24:
+Run these checks before submitting a pull request. CI runs the same checks on Node.js 22.13 and 24:
 
 ```sh
 npm run typecheck

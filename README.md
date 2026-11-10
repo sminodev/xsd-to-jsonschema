@@ -12,7 +12,7 @@ JSON representation and supported XSD constructs.
 npm install xsd-to-jsonschema
 ```
 
-Node.js 22.12 or later is required. The package is an ES module, but `require()` is also supported on that runtime.
+Node.js 22.13 or later is required. The package is an ES module, but `require()` is also supported on that runtime.
 
 ## Quick start
 
