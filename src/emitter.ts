@@ -5,6 +5,7 @@
 
 import type { Element } from '@xmldom/xmldom';
 import { attributeKey, elementKey, planKeys, renameObject } from './keys.js';
+import { float32Range } from './value-forms.js';
 import { ContentModel, emptyFragment, type Fragment, occurs, type Prop, writeObject } from './content-model.js';
 import { Definitions } from './definitions.js';
 import type { JsonSchema, XmlAnnotation } from './json-schema.js';
@@ -55,6 +56,8 @@ export class Emitter {
   private readonly definitions = new Definitions();
   /** the anonymous complex types of local elements being written, to stop one that contains itself */
   private readonly openLocal = new Set<Element>();
+  /** how deep the local element types around a deferred definition nest */
+  private localBase = 0;
   /** the final property names of the object of each complex type, for its nil form */
   private readonly keyPlans = new Map<Element, Map<string, string>>();
   private rootId: string | undefined;
@@ -65,8 +68,12 @@ export class Emitter {
     private readonly problems: Problems,
     private readonly options: EmitterOptions,
   ) {
-    this.simple = new SimpleTypes(set, problems, options, (local, build) =>
-      this.definitions.ref('type', clark(XS, local), local, build),
+    this.simple = new SimpleTypes(
+      set,
+      problems,
+      options,
+      (local, build) => this.definitions.ref('type', clark(XS, local), local, build),
+      (name, from) => this.typeRef(name, from),
     );
     this.poly = new Polymorphism(set);
     this.contentModel = new ContentModel(
@@ -234,13 +241,24 @@ export class Emitter {
         schema = { $ref: '#' };
       } else if (decl.global && !inline) {
         schema = this.definitions.ref('element', id, decl.name, () => this.complexType(anonymousComplex, decl.doc));
-      } else if (this.openLocal.has(anonymousComplex)) {
-        // A local element that contains itself through its content refers to a definition of its type.
+      } else if (this.openLocal.has(anonymousComplex) || this.openLocal.size >= MAX_INLINE_DEPTH) {
+        // A local element that contains itself through its content refers to a definition of its type; so does one
+        // nested very deep, whose definition is written later, after the stack has unwound.
         const at = this.set.at(anonymousComplex);
         const where = `${at.file ?? ''}:${anonymousComplex.lineNumber ?? 0}:${anonymousComplex.columnNumber ?? 0}`;
-        schema = this.definitions.ref('local', `${id} ${where}`, decl.name, () =>
-          this.localComplexType(anonymousComplex, decl.doc),
-        );
+        const depth = this.localBase + this.openLocal.size;
+        if (depth >= MAX_LOCAL_DEPTH) {
+          throw new RangeError(`local element types nest deeper than ${MAX_LOCAL_DEPTH} levels`);
+        }
+        schema = this.definitions.ref('local', `${id} ${where}`, decl.name, () => {
+          const saved = this.localBase;
+          this.localBase = depth;
+          try {
+            return this.localComplexType(anonymousComplex, decl.doc);
+          } finally {
+            this.localBase = saved;
+          }
+        });
       } else {
         schema = this.localComplexType(anonymousComplex, decl.doc);
       }
@@ -448,14 +466,11 @@ export class Emitter {
       }
     }
     if (valueType !== undefined) {
-      return withPattern({ ...schema, ...without(values, 'pattern') }, values.pattern);
+      return withPattern(withValuesOf(schema, values), values.pattern);
     }
     const key = this.options.textProperty;
     const text = schema.properties?.[key];
-    const textSchema = withPattern(
-      { ...(typeof text === 'object' ? text : {}), ...without(values, 'pattern') },
-      values.pattern,
-    );
+    const textSchema = withPattern(withValuesOf(typeof text === 'object' ? text : {}, values), values.pattern);
     return { ...schema, type: 'object', properties: { ...schema.properties, [key]: textSchema } };
   }
 
@@ -465,6 +480,13 @@ export class Emitter {
    * or double member of a union), the value is only a `default`.
    */
   private fixedByValue(values: JsonSchema, type: SimpleTypeRef, lexical: string, node: Element): void {
+    // An xs:float is a 32-bit float: every number that rounds to the fixed float is that value.
+    if (typeof values.const === 'number' && this.simple.isFloat(type, node)) {
+      values.allOf = [float32Range(values.const)];
+      values.default = values.const;
+      delete values.const;
+      return;
+    }
     const forms = this.simple.fixedForms(type, lexical, node);
     if ('unlisted' in forms) {
       this.problems.warning(
@@ -484,7 +506,8 @@ export class Emitter {
   /**
    * The schema of a nillable element: its content, or its nil form, marked with `xml.nillable`. The nil form is
    * `null` when the element can do without attributes, and an object with the attributes and the text property
-   * `null` when it has attributes.
+   * `null` when it has attributes. With `xsi:type`, the nil form of each type the element may have carries `#type`
+   * and the attributes of that type, inherited ones included.
    */
   private nillable(decl: ElementDeclaration, schema: JsonSchema): JsonSchema {
     if (!isTrue(attr(decl.node, 'nillable'))) {
@@ -493,43 +516,29 @@ export class Emitter {
     const forms: JsonSchema[] = [];
     const { attributes, anyAttribute } = this.declaredAttributes(decl);
     const type = this.poly.typeName(decl.node);
-    const typeIds =
-      (type &&
-        this.set.lookup('complexType', type) &&
-        this.typeChoices(decl, type)?.map((alternative) => alternative.id)) ||
-      [];
+    const declared = type && this.set.lookup('complexType', type);
+    const alternatives = (declared && type && this.typeChoices(decl, type)) || [];
+    const declaredId = type && clark(type.ns, type.local);
     if (!attributes.some((a) => a.required)) {
       forms.push({ type: 'null' });
     }
-    const key = this.options.textProperty;
     const plan = this.keyPlan(decl);
-    const clash = attributes.find((a) => (plan.get(a.key) ?? a.key) === key);
-    if (clash) {
-      this.problems.error(
-        'duplicate-name',
-        `${key} is the name of an attribute and of the text property of the nil form of ${decl.name}`,
-        this.set.at(clash.node),
-      );
-    } else if (attributes.length > 0 || anyAttribute || typeIds.length > 0) {
-      // With xsi:type, the nil form is an object even without attributes; then `#type` is required.
-      const properties: Record<string, JsonSchema> = typeIds.length > 0 ? { '#type': this.typeProperty(typeIds) } : {};
-      const required: string[] = typeIds.length > 0 && attributes.length === 0 && !anyAttribute ? ['#type'] : [];
-      for (const attribute of attributes) {
-        properties[attribute.key] = attribute.schema;
-        if (attribute.required) {
-          required.push(attribute.key);
-        }
+    if (alternatives.length === 0) {
+      const form = this.nilForm(decl, attributes, anyAttribute, plan);
+      if (form && (attributes.length > 0 || anyAttribute)) {
+        forms.push(form);
       }
-      properties[key] = this.options.xml ? { type: 'null', xml: { text: true } } : { type: 'null' };
-      required.push(key);
-      const form: JsonSchema = { type: 'object', properties, required };
-      renameObject(form, plan, this.options.xml);
-      if (!anyAttribute) {
-        form.additionalProperties = false;
-      } else if (this.options.xml) {
-        form.xml = { anyAttribute: true };
+    }
+    for (const alternative of alternatives) {
+      // The declared type may go without `#type`; any other type needs it.
+      const own = alternative.id === declaredId;
+      const complex = own ? undefined : this.set.lookup('complexType', alternative.name);
+      const typed = complex ? this.typeAttributes(complex.node, complex.doc, new Set()) : { attributes, anyAttribute };
+      const typePlan = complex ? this.keyPlanOf(complex.node, complex.doc) : plan;
+      const form = this.nilForm(decl, typed.attributes, typed.anyAttribute, typePlan, alternative.id, !own);
+      if (form) {
+        forms.push(form);
       }
-      forms.push(form);
     }
     const out: JsonSchema = {};
     if (schema.description) {
@@ -542,20 +551,64 @@ export class Emitter {
     return out;
   }
 
+  /**
+   * One nil form as an object: the attributes, the text property `null` and, for a type xsi:type names, `#type`.
+   * Undefined if an attribute takes the name of the text property.
+   */
+  private nilForm(
+    decl: ElementDeclaration,
+    attributes: (AttributeProp & { prohibited?: false })[],
+    anyAttribute: boolean,
+    plan: Map<string, string>,
+    typeId?: string,
+    typeRequired = false,
+  ): JsonSchema | undefined {
+    const key = this.options.textProperty;
+    const clash = attributes.find((a) => (plan.get(a.key) ?? a.key) === key);
+    if (clash) {
+      this.problems.error(
+        'duplicate-name',
+        `${key} is the name of an attribute and of the text property of the nil form of ${decl.name}`,
+        this.set.at(clash.node),
+      );
+      return undefined;
+    }
+    const properties: Record<string, JsonSchema> = typeId === undefined ? {} : { '#type': this.typeProperty([typeId]) };
+    const required: string[] = typeRequired ? ['#type'] : [];
+    for (const attribute of attributes) {
+      properties[attribute.key] = attribute.schema;
+      if (attribute.required) {
+        required.push(attribute.key);
+      }
+    }
+    properties[key] = this.options.xml ? { type: 'null', xml: { text: true } } : { type: 'null' };
+    required.push(key);
+    const form: JsonSchema = { type: 'object', properties, required };
+    if (!anyAttribute) {
+      form.additionalProperties = false;
+    } else if (this.options.xml) {
+      form.xml = { anyAttribute: true };
+    }
+    renameObject(form, plan, this.options.xml);
+    return form;
+  }
+
   /** The final property names of the object of an element declaration's complex type; see `planKeys`. */
   private keyPlan(decl: ElementDeclaration): Map<string, string> {
     const typeName = this.poly.typeName(decl.node);
     const named = typeName === undefined ? undefined : this.set.lookup('complexType', typeName);
     const node = named?.node ?? xsChild(decl.node, 'complexType');
-    if (!node) {
-      return new Map();
-    }
+    return node ? this.keyPlanOf(node, named?.doc ?? decl.doc) : new Map<string, string>();
+  }
+
+  /** The final property names of the object of a complex type. */
+  private keyPlanOf(node: Element, doc: SchemaDocument): Map<string, string> {
     let plan = this.keyPlans.get(node);
     if (plan === undefined) {
       // A type that holds a nillable element of its own type asks again while its content is read: the keys of
       // that inner pass are not used.
       this.keyPlans.set(node, new Map());
-      const { fragment, attributes } = this.content(node, named?.doc ?? decl.doc);
+      const { fragment, attributes } = this.content(node, doc);
       const keys = [...attributes.filter((a) => !a.prohibited).map((a) => a.key), ...fragment.props.map((p) => p.key)];
       plan = planKeys(keys, this.options.textProperty);
       this.keyPlans.set(node, plan);
@@ -995,6 +1048,11 @@ export class Emitter {
 
 const isTrue = (value: string | undefined): boolean => value === 'true' || value === '1';
 
+/** How many anonymous complex types of local elements are written in place, one inside the other. */
+const MAX_INLINE_DEPTH = 64;
+/** How deep anonymous complex types of local elements may nest at all; a validator could not follow deeper. */
+const MAX_LOCAL_DEPTH = 1000;
+
 /** The facets of a simpleContent restriction: its children apart from attributes, a simple type and 1.1 content. */
 function textFacets(derivation: Element): Element[] {
   const other = ['attribute', 'attributeGroup', 'anyAttribute', 'simpleType', ...XSD_1_1_CONTENT];
@@ -1008,6 +1066,15 @@ function overrideAttributes(base: AttributeProp[], own: AttributeProp[]): Attrib
     byId.set(attribute.id, attribute);
   }
   return [...byId.values()].filter((a) => !a.prohibited);
+}
+
+/** A schema with the keywords of a fixed or default value, its `allOf` joined to the schema's own. */
+function withValuesOf(schema: JsonSchema, values: JsonSchema): JsonSchema {
+  const out: JsonSchema = { ...schema, ...without(values, 'pattern') };
+  if (schema.allOf && values.allOf) {
+    out.allOf = [...schema.allOf, ...values.allOf];
+  }
+  return out;
 }
 
 /** Adds a pattern to a schema; next to a pattern of its own, as one more part of `allOf`. */
@@ -1040,7 +1107,16 @@ function annotate(schema: JsonSchema, description: string | undefined, xml: XmlA
 }
 
 /** What the `xml` annotation of a type written in place says about its values, kept next to that of a property. */
-const TYPE_XML = ['whiteSpace', 'list', 'type', 'nillable', 'anyElement', 'anyAttribute', 'anyType'] as const;
+const TYPE_XML = [
+  'whiteSpace',
+  'list',
+  'type',
+  'decimal',
+  'nillable',
+  'anyElement',
+  'anyAttribute',
+  'anyType',
+] as const;
 
 /** The `xml` annotation of a property, keeping what the annotation of a type written in place says about values. */
 function withTypeXml(xml: XmlAnnotation, schema: JsonSchema): XmlAnnotation {

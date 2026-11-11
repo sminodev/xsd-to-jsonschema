@@ -14,10 +14,13 @@
       "w": "deep"
     },
     "m": {
-      "value": "before<f:b xmlns:f=\"urn:foreign\">bold</f:b>after"
+      "value": "before<f:b xmlns:f=\"urn:foreign\">bold</f:b><f:i xmlns:f=\"urn:foreign\"/>after"
     },
     "empty": "",
     "@value": "w",
-    "{urn:foreign}value": "v"
+    "{urn:foreign}value": "v",
+    "attronly": {
+      "a": "1"
+    }
   }
 }

@@ -77,10 +77,23 @@ export function renameObject(schema: JsonSchema, plan: Map<string, string>, xml:
         continue;
       }
       const local = localName(key);
-      properties[name] =
+      const property =
         xml && name !== local && typeof value === 'object' ? { ...value, xml: { name: local, ...value.xml } } : value;
+      // defineProperty: a name such as __proto__ is an own property, not the prototype.
+      Object.defineProperty(properties, name, {
+        value: property,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
     schema.properties = properties;
+    // Ajv leaves a property named __proto__ out of `properties` and would count it as additional: such an object is
+    // closed by the names of its properties instead.
+    if (Object.hasOwn(properties, '__proto__') && schema.additionalProperties === false) {
+      delete schema.additionalProperties;
+      schema.propertyNames = { enum: Object.keys(properties) };
+    }
   }
   renameConstraints(schema, plan);
   return clashes;
@@ -96,13 +109,23 @@ function renameConstraints(schema: JsonSchema, plan: Map<string, string>): void 
       Object.entries(schema.dependentRequired).map(([key, keys]) => [rename(key), keys.map(rename)]),
     );
   }
-  for (const branch of [...(schema.oneOf ?? []), ...(schema.anyOf ?? []), ...(schema.allOf ?? [])]) {
-    if (branch.properties) {
-      branch.properties = Object.fromEntries(Object.entries(branch.properties).map(([key, v]) => [rename(key), v]));
-    }
-    renameConstraints(branch, plan);
+  if (schema.dependentSchemas) {
+    schema.dependentSchemas = Object.fromEntries(
+      Object.entries(schema.dependentSchemas).map(([key, dependent]) => [rename(key), dependent]),
+    );
   }
-  if (schema.not) {
-    renameConstraints(schema.not, plan);
+  // The constraints of choices: their branches, what they rule out, and what a property brings along.
+  const parts = [
+    ...(schema.oneOf ?? []),
+    ...(schema.anyOf ?? []),
+    ...(schema.allOf ?? []),
+    ...(schema.not ? [schema.not] : []),
+    ...Object.values(schema.dependentSchemas ?? {}),
+  ];
+  for (const part of parts) {
+    if (part.properties) {
+      part.properties = Object.fromEntries(Object.entries(part.properties).map(([key, v]) => [rename(key), v]));
+    }
+    renameConstraints(part, plan);
   }
 }

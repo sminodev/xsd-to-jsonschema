@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- xsi:nil on a simple type, a complex type with an attribute, simple content with an attribute, and a repeated element. -->
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:v:nil" targetNamespace="urn:v:nil" elementFormDefault="qualified">
+  <xs:complexType name="B"/>
+  <xs:complexType name="D"><xs:complexContent><xs:extension base="B"><xs:attribute name="extra" type="xs:string" use="required"/></xs:extension></xs:complexContent></xs:complexType>
   <xs:element name="R">
     <xs:complexType>
       <xs:sequence>
@@ -19,6 +21,7 @@
         </xs:element>
         <xs:element name="L" type="xs:int" nillable="true" maxOccurs="3"/>
         <xs:element name="N" type="xs:int" nillable="true"/>
+        <xs:element name="P" type="B" nillable="true" minOccurs="0"/>
       </xs:sequence>
     </xs:complexType>
   </xs:element>

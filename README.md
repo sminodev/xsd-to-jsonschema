@@ -190,9 +190,11 @@ validation.
   "required": ["created", "Title", "Express", "Line"],
   "additionalProperties": false,
   "dependentRequired": { "DiscountCode": ["DiscountPercent"], "DiscountPercent": ["DiscountCode"] },
-  "oneOf": [
-    { "required": ["Pickup"], "properties": { "DeliveryDate": false, "DeliveryTime": false } },
-    { "required": ["DeliveryDate"], "properties": { "Pickup": false } }
+  "allOf": [
+    {
+      "oneOf": [{ "required": ["Pickup"] }, { "required": ["DeliveryDate"] }],
+      "dependentRequired": { "DeliveryTime": ["DeliveryDate"] }
+    }
   ],
   "xml": { "name": "Order", "namespace": "urn:example:order" },
   "$defs": {
@@ -207,7 +209,7 @@ validation.
       "multipleOf": 0.1,
       "minimum": 0,
       "maximum": 100,
-      "xml": { "type": "{urn:example:common}Percent" }
+      "xml": { "decimal": true, "type": "{urn:example:common}Percent" }
     },
     "Contact": {
       "type": "object",
@@ -229,7 +231,7 @@ validation.
       "properties": {
         "#type": { "const": "{urn:example:common}Price", "xml": { "xsiType": true } },
         "currency": { "$ref": "#/$defs/Currency", "xml": { "attribute": true } },
-        "value": { "type": "number", "xml": { "text": true } }
+        "value": { "type": "number", "xml": { "text": true, "decimal": true } }
       },
       "required": ["currency", "value"],
       "additionalProperties": false
@@ -239,7 +241,7 @@ validation.
       "multipleOf": 0.01,
       "exclusiveMinimum": 0,
       "maximum": 100000,
-      "xml": { "type": "{urn:example:common}Kilogram" }
+      "xml": { "decimal": true, "type": "{urn:example:common}Kilogram" }
     }
   }
 }

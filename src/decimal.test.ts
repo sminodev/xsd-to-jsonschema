@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isExact, isMultipleOf } from './decimal.js';
+import { float32Range } from './value-forms.js';
 
 describe('exact decimals', () => {
   it.each([
@@ -39,4 +40,27 @@ describe('decimal multiples', () => {
   ])('checks %s against a step of %s', (value, step, expected) => {
     expect(isMultipleOf(value, step)).toBe(expected);
   });
+});
+
+describe('the range of doubles that are one xs:float', () => {
+  const inside = (range: ReturnType<typeof float32Range>, v: number) =>
+    (range.minimum === undefined || v >= range.minimum) &&
+    (range.exclusiveMinimum === undefined || v > range.exclusiveMinimum) &&
+    (range.maximum === undefined || v <= range.maximum) &&
+    (range.exclusiveMaximum === undefined || v < range.exclusiveMaximum);
+  it.each([0.1, 3, -2.5, 0, 1e-45, 3.4028234663852886e38, -1e30, 16777217])(
+    'holds exactly the doubles that round to %s',
+    (v) => {
+      const range = float32Range(v);
+      const f = Math.fround(v);
+      for (const probe of [f, v, f * (1 + 1e-9), f * (1 - 1e-9), f + 1e-46, f - 1e-46]) {
+        expect(inside(range, probe), String(probe)).toBe(Math.fround(probe) === f);
+      }
+      for (const end of [range.minimum, range.maximum, range.exclusiveMinimum, range.exclusiveMaximum]) {
+        if (end !== undefined && Number.isFinite(end)) {
+          expect(inside(range, end), `end ${end}`).toBe(Math.fround(end) === f);
+        }
+      }
+    },
+  );
 });

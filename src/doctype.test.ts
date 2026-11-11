@@ -7,7 +7,7 @@ import { checkDoctype } from './doctype.js';
 import { ajvFor } from './test-support/oracle.js';
 import { xmlToJson } from './test-support/xml-to-json.js';
 
-// The DOCTYPE cases shared with xsd-faker: each file is a schema for {urn:test:ds}Sig, and sample.xml is valid.
+// The DOCTYPE cases: each file is a schema for {urn:test:ds}Sig, and sample.xml is valid.
 const CASES = join(dirname(fileURLToPath(import.meta.url)), 'test-support', 'doctype');
 const files = readdirSync(CASES).filter((file) => file.endsWith('.xsd'));
 
@@ -18,7 +18,7 @@ describe('DOCTYPE declarations in schema documents', () => {
     expect(problems.map((p) => p.code)).toEqual(['unsafe-input']);
   });
 
-  it('neutralize the harmless W3C form, report it and keep the line numbers', () => {
+  it('neutralize the harmless form, report it and keep the line numbers', () => {
     const { schema, problems } = convertFile(join(CASES, 'allowed-inert-doctype.xsd'));
     expect(problems.map((p) => p.code)).toEqual(['neutralized-doctype']);
     const sample = readFileSync(join(CASES, 'sample.xml'), 'utf8');
@@ -33,10 +33,51 @@ describe('DOCTYPE declarations in schema documents', () => {
     }
   });
 
-  it('load a document whose DOCTYPE text stands only in a comment without any report', () => {
-    const { schema, problems } = convertFile(join(CASES, 'allowed-doctype-only-in-comment.xsd'));
-    expect(problems).toEqual([]);
-    expect(schema).toBeDefined();
+  it.each(files.filter((file) => file.startsWith('allowed-entity-')))(
+    'neutralize %s: an entity name in a comment or CDATA is no reference',
+    (file) => {
+      const { schema, problems } = convertFile(join(CASES, file));
+      expect(problems.map((p) => p.code)).toEqual(['neutralized-doctype']);
+      expect(schema).toBeDefined();
+    },
+  );
+
+  it.each(['allowed-doctype-only-in-comment.xsd', 'allowed-comment-starts-with-hyphen.xsd'])(
+    'load %s without any report: the DOCTYPE text stands only in a comment',
+    (file) => {
+      const { schema, problems } = convertFile(join(CASES, file));
+      expect(problems).toEqual([]);
+      expect(schema).toBeDefined();
+    },
+  );
+
+  it.each(files.filter((file) => file.startsWith('malformed-')))('report %s as invalid-xml', (file) => {
+    const { schema, problems } = convertFile(join(CASES, file));
+    expect(schema).toBeUndefined();
+    expect(problems.map((p) => p.code)).toEqual(['invalid-xml']);
+  });
+
+  it('cover every case', () => {
+    const known = [
+      'rejected-',
+      'malformed-',
+      'allowed-entity-',
+      'allowed-inert-doctype',
+      'allowed-doctype-only-in-comment',
+      'allowed-comment-starts-with-hyphen',
+    ];
+    expect(files.filter((file) => !known.some((prefix) => file.startsWith(prefix)))).toEqual([]);
+    expect(files).toHaveLength(25);
+  });
+
+  it('read a large body in linear time: 4 MiB of entity references take well under a second', () => {
+    const doctype = '<?xml version="1.0"?><!DOCTYPE schema [ <!ENTITY unused "x"> ]>';
+    const body = '&amp;'.repeat(Math.floor((4 * 1024 * 1024 - 200) / 5));
+    const text = `${doctype}<schema xmlns="http://www.w3.org/2001/XMLSchema"><annotation><documentation>${body}</documentation></annotation></schema>`;
+    const started = performance.now();
+    expect(checkDoctype(text).kind).toBe('neutralized');
+    expect(checkDoctype(text.replace('&amp;', '&unused;')).kind).toBe('refused');
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 
   it.each([

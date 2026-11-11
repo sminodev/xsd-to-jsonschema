@@ -28,6 +28,8 @@ export interface XmlAnnotation {
   xsiType?: boolean;
   /** the declared simple type of an element value, as `{namespace}local`: the only type xsi:type may name there */
   type?: string;
+  /** a number of xs:decimal or a restriction of it: written without exponent, an integer also as `1.0` */
+  decimal?: boolean;
 }
 
 export type JsonType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array' | 'null';
@@ -56,9 +58,12 @@ export interface JsonSchema {
   minItems?: number;
   maxItems?: number;
   properties?: Record<string, JsonSchema | boolean>;
+  /** closes an object with a property named `__proto__`, which Ajv leaves out of `properties` */
+  propertyNames?: JsonSchema;
   required?: string[];
   additionalProperties?: boolean;
   dependentRequired?: Record<string, string[]>;
+  dependentSchemas?: Record<string, JsonSchema>;
   oneOf?: JsonSchema[];
   anyOf?: JsonSchema[];
   allOf?: JsonSchema[];

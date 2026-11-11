@@ -1,4 +1,4 @@
-// The JSON contract shared with xsd-faker: each case in test-support/contract has a schema.xsd and documents.
+// The JSON contract: each case in test-support/contract has a schema.xsd and documents.
 //
 // - valid*.xml is valid; the oracle maps it to exactly valid*.json, and the generated schema accepts that.
 // - invalid-*.xml is invalid; the schema rejects the oracle's JSON, or the oracle reports an error.
@@ -28,6 +28,9 @@ const CASES = [
   'special-floats',
   'anytype',
   'redefine',
+  'xml-whitespace',
+  'mixed',
+  'substitution-reading',
 ];
 /** Documents libxml2 judges against XML Schema 1.0, as the case's README says; the contract follows the standard. */
 const LIBXML2_WRONG = new Set(['special-floats/invalid-nan-below-bound.xml']);

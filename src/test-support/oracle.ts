@@ -14,7 +14,8 @@ export { isMultipleOf } from '../decimal.js';
 
 export function ajvFor(schema: JsonSchema): ValidateFunction {
   // strictRequired would want each choice branch to define the properties it requires once more.
-  const ajv = new Ajv2020({ strict: true, strictRequired: false, allErrors: true });
+  // ownProperties: XML names such as constructor are ordinary property names, not inherited ones.
+  const ajv = new Ajv2020({ strict: true, strictRequired: false, allErrors: true, ownProperties: true });
   // ajv-formats is CommonJS: the default import is module.exports, which carries the plugin as `default` too.
   addFormats.default(ajv);
   ajv.addKeyword('xml');

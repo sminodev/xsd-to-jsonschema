@@ -1,6 +1,7 @@
 import { DOMParser, type Element, type Node } from '@xmldom/xmldom';
 import { type At, messageOf, type Problems } from './problems.js';
 import { checkDoctype } from './doctype.js';
+import { EncodingError } from './encoding.js';
 
 export const XS = 'http://www.w3.org/2001/XMLSchema';
 const XML_NS = 'http://www.w3.org/XML/1998/namespace';
@@ -42,6 +43,14 @@ export const DEFAULT_LIMITS: EffectiveLimits = {
 
 /** The limits with their defaults; throws a TypeError for a value that is no positive safe integer. */
 export function effectiveLimits(limits: Limits = {}): EffectiveLimits {
+  const plain =
+    typeof limits === 'object' &&
+    limits !== null &&
+    !Array.isArray(limits) &&
+    [Object.prototype, null].includes(Object.getPrototypeOf(limits) as object | null);
+  if (!plain) {
+    throw new TypeError(`limits must be a plain object, not ${Array.isArray(limits) ? 'an array' : typeof limits}`);
+  }
   const out = { ...DEFAULT_LIMITS };
   for (const key of Object.keys(DEFAULT_LIMITS) as (keyof Limits)[]) {
     const value = limits[key];
@@ -59,6 +68,11 @@ export function effectiveLimits(limits: Limits = {}): EffectiveLimits {
 /** Thrown by a reader for a document above `maxFileBytes`, before it reads all of it. */
 export class FileTooLarge extends Error {
   override name = 'FileTooLarge';
+}
+
+/** Thrown by a reader for a location it must not read: outside its base directory, or a `file:` URL. */
+export class UnsafeLocation extends Error {
+  override name = 'UnsafeLocation';
 }
 
 /** A global component and the document that declares it. */
@@ -212,10 +226,15 @@ export class SchemaSet {
    */
   blocked = false;
 
+  /**
+   * @param sizeOf - the bytes of a document in its file, if the reader knows them; otherwise the bytes of its text as
+   * UTF-8 count
+   */
   constructor(
     source: SchemaSource,
     private readonly problems: Problems,
     limits?: Limits,
+    private readonly sizeOf?: (path: string) => number | undefined,
   ) {
     this.limits = effectiveLimits(limits);
     this.read =
@@ -269,7 +288,13 @@ export class SchemaSet {
     try {
       text = this.read(path);
     } catch (e) {
-      if (e instanceof FileTooLarge) {
+      if (e instanceof EncodingError) {
+        this.blocked = true;
+        this.problems.error(e.code, `schema document ${path}: ${messageOf(e)}`, at);
+      } else if (e instanceof UnsafeLocation) {
+        this.blocked = true;
+        this.problems.error('unsafe-input', `schema document ${path} is not read: ${messageOf(e)}`, at);
+      } else if (e instanceof FileTooLarge) {
         this.blocked = true;
         this.problems.error('resource-limit', `${path} exceeds the limit of ${maxFileBytes} bytes per file`, at);
       } else {
@@ -282,7 +307,7 @@ export class SchemaSet {
       return undefined;
     }
     text = String(text);
-    const bytes = new TextEncoder().encode(text).length;
+    const bytes = this.sizeOf?.(path) ?? new TextEncoder().encode(text).length;
     this.loadedBytes += bytes;
     if (bytes > maxFileBytes) {
       this.blocked = true;
@@ -295,6 +320,10 @@ export class SchemaSet {
       return undefined;
     }
     const doctype = checkDoctype(text);
+    if (doctype.kind === 'invalid') {
+      this.problems.error('invalid-xml', `${path}: ${doctype.reason}`, { file: path });
+      return undefined;
+    }
     if (doctype.kind === 'refused') {
       this.blocked = true;
       this.problems.error('unsafe-input', `the DOCTYPE declaration is refused: ${doctype.reason}`, { file: path });
@@ -311,7 +340,7 @@ export class SchemaSet {
             throw new Error(message);
           }
         },
-      }).parseFromString(text.replace(/^[\uFEFF\s]+/, ''), 'text/xml');
+      }).parseFromString(text.replace(/^[\uFEFF \t\n\r]+/, ''), 'text/xml');
       root = xml.documentElement;
     } catch (e) {
       this.problems.error('invalid-xml', `${path}: ${messageOf(e)}`, { file: path });
@@ -322,19 +351,6 @@ export class SchemaSet {
       return undefined;
     }
     if (doctype.kind === 'neutralized') {
-      // A namespace default of the DTD changes nothing only where the root element states the same value itself.
-      const differing = doctype.defaults.find(
-        (d) => d.element !== root.nodeName || !root.hasAttribute(d.name) || root.getAttribute(d.name) !== d.value,
-      );
-      if (differing) {
-        this.blocked = true;
-        this.problems.error(
-          'unsafe-input',
-          `the DOCTYPE declaration is refused: its default ${differing.name}="${differing.value}" for ${differing.element} is not stated the same way by the root element`,
-          { file: path },
-        );
-        return undefined;
-      }
       this.problems.warning(
         'neutralized-doctype',
         'the DOCTYPE declaration changes nothing and is ignored; its identifiers are not read',

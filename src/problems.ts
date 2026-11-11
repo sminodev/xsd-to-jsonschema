@@ -48,6 +48,7 @@ export const PROBLEM_CODES = [
   'root-required',
   'unknown-root',
   'unsafe-input',
+  'unsupported-encoding',
 ] as const;
 
 export type ProblemCode = (typeof PROBLEM_CODES)[number];

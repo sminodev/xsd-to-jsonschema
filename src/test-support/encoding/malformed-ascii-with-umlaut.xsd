@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="US-ASCII"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="Name"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="Müller"/></xs:restriction></xs:simpleType></xs:element></xs:schema>

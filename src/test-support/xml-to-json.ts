@@ -9,6 +9,9 @@ import type { JsonSchema, XmlAnnotation } from '../json-schema.js';
 
 const XSI = 'http://www.w3.org/2001/XMLSchema-instance';
 const XS = 'http://www.w3.org/2001/XMLSchema';
+
+// XML white space is space, tab, line feed and carriage return only (XML 1.0, 2.3); `trim()` would also remove U+00A0.
+const xmlTrim = (text: string): string => text.replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, '');
 // The lexical forms of numbers (XML Schema Part 2, 3.2.3, 3.2.4, 3.3.13): an integer has digits only, a decimal no
 // exponent, a float or double may have one.
 const INTEGER = /^[+-]?[0-9]+$/;
@@ -34,10 +37,10 @@ type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type JsonObject = { [key: string]: Json };
 
 // How far the reader looks for a reading of repeated groups that the schema accepts.
-const MAX_READINGS = 64;
+const MAX_READINGS = 1024;
 // Other readings are only sought among this many children; their copies would take quadratic time beyond.
 const MAX_SEARCH_CHILDREN = 500;
-const MAX_STEPS = 10_000;
+const MAX_STEPS = 100_000;
 
 const isElement = (node: Node): node is Element => node.nodeType === 1;
 
@@ -84,7 +87,7 @@ function declarationsOf(element: Element): string[] {
       }
       // The type xsi:type names is a name of the fragment too, right after xsi.
       if (a.namespaceURI === XSI && a.localName === 'type') {
-        const value = a.value.trim();
+        const value = xmlTrim(a.value);
         const colon = value.indexOf(':');
         const prefix = colon < 0 ? null : value.slice(0, colon);
         const ns = node.lookupNamespaceURI(prefix);
@@ -106,9 +109,16 @@ function declarationsOf(element: Element): string[] {
   ];
 }
 
+// Own properties only: an XML name such as __proto__, constructor or toString is an ordinary key.
+const own = (object: JsonObject, key: string): Json | undefined =>
+  Object.hasOwn(object, key) ? object[key] : undefined;
+const put = (object: JsonObject, key: string, value: Json): void => {
+  Object.defineProperty(object, key, { value, enumerable: true, writable: true, configurable: true });
+};
+
 // Checks a value against one member of a union, to find the member that takes the text. A member may refer to the
 // definitions of the schema, so it is compiled with them.
-const memberAjv = new Ajv2020({ strict: false });
+const memberAjv = new Ajv2020({ strict: false, ownProperties: true, validateSchema: false });
 // ajv-formats is CommonJS: the default import is module.exports, which carries the plugin as `default` too.
 addFormats.default(memberAjv);
 memberAjv.addKeyword('xml');
@@ -130,7 +140,7 @@ const readingAjvs = new WeakMap<JsonSchema, Ajv2020>();
 function ajvFor(schema: JsonSchema): Ajv2020 {
   let ajv = readingAjvs.get(schema);
   if (ajv === undefined) {
-    ajv = new Ajv2020({ strict: false, multipleOfPrecision: 12 });
+    ajv = new Ajv2020({ strict: false, multipleOfPrecision: 12, ownProperties: true, validateSchema: false });
     addFormats.default(ajv);
     ajv.addKeyword('xml');
     ajv.addSchema({ ...schema, $id: ROOT });
@@ -156,8 +166,9 @@ function absolute(part: unknown): unknown {
 }
 
 /**
- * Why a document has no JSON form. `xsi-type-simple` and `name-collision` are documented limits of the mapping: the
- * XML can be valid. The other causes mean the XML is invalid.
+ * Why a document has no JSON form. `xsi-type-simple`, `name-collision` and `reading-limit` (the reader can't tell
+ * which reading of repeated groups the document means) are documented limits of the mapping: the XML can be valid.
+ * The other causes mean the XML is invalid.
  */
 export type MappingCause =
   | 'xsi-type-simple'
@@ -166,10 +177,15 @@ export type MappingCause =
   | 'unknown-type'
   | 'not-nillable'
   | 'invalid-nil'
-  | 'undeclared-prefix';
+  | 'undeclared-prefix'
+  | 'reading-limit';
 
 /** The causes that are limits of the mapping rather than mistakes in the XML. */
-export const MAPPING_LIMITS: ReadonlySet<MappingCause> = new Set(['xsi-type-simple', 'name-collision']);
+export const MAPPING_LIMITS: ReadonlySet<MappingCause> = new Set([
+  'xsi-type-simple',
+  'name-collision',
+  'reading-limit',
+]);
 
 /** A document, or a part of it, has no JSON form; `code` says why, `path` where. */
 export class MappingError extends Error {
@@ -264,7 +280,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
   };
 
   // A member of the `xml` annotation of a value: on the property itself or on the definition it refers to.
-  const xmlOf = <K extends 'whiteSpace' | 'list' | 'type' | 'anyType'>(
+  const xmlOf = <K extends 'whiteSpace' | 'list' | 'type' | 'anyType' | 'decimal'>(
     s: JsonSchema,
     key: K,
   ): XmlAnnotation[K] | undefined => {
@@ -291,7 +307,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
       return raw;
     }
     const replaced = raw.replace(/[\t\n\r]/g, ' ');
-    return whiteSpace === 'collapse' ? replaced.replace(/ {2,}/g, ' ').trim() : replaced;
+    return whiteSpace === 'collapse' ? xmlTrim(replaced.replace(/ {2,}/g, ' ')) : replaced;
   };
 
   // A union of string values: the text as the first member that accepts it normalizes it, trying the members in
@@ -302,12 +318,37 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
       return undefined;
     }
     for (const member of target.anyOf) {
-      const text = memberText(raw, member) ?? normalize(raw, member.xml?.whiteSpace);
+      // A member that is a union itself takes the text if one of its members does and its own facets allow it; one
+      // of whose members takes it, none does. Its members aren't checked once more.
+      const inner = memberText(raw, member);
+      if (inner !== undefined) {
+        if (memberAccepts(ownFacets(member), inner, defs)) {
+          return inner;
+        }
+        continue;
+      }
+      if (jsonType(member) === 'string' && resolve(member).anyOf) {
+        continue;
+      }
+      const text = normalize(raw, xmlOf(member, 'whiteSpace'));
       if (memberAccepts(member, text, defs)) {
         return text;
       }
     }
     return undefined;
+  };
+
+  // A union member without its own members: what it checks beyond them.
+  const facetsOf = new WeakMap<JsonSchema, JsonSchema>();
+  const ownFacets = (member: JsonSchema): JsonSchema => {
+    let own = facetsOf.get(member);
+    if (own === undefined) {
+      own = { ...resolve(member) };
+      delete own.anyOf;
+      delete own.$ref;
+      facetsOf.set(member, own);
+    }
+    return own;
   };
 
   const value = (text: string, s: JsonSchema): Json => {
@@ -319,7 +360,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
     }
     const raw = memberText(text, s) ?? normalize(text, xmlOf(s, 'whiteSpace'));
     const type = jsonType(s);
-    const trimmed = raw.trim();
+    const trimmed = xmlTrim(raw);
     if (type === 'integer' || type === 'number') {
       // Numbers collapse their white space; INF, -INF and NaN stay strings. A literal beyond the range of a double
       // is INF or -INF, as XML Schema 1.1 rounds it; JSON has no infinite number.
@@ -340,15 +381,15 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
     return raw;
   };
 
-  // The lexical form of a number: by the built-in type `xml.type` names, else by the JSON type. Without a built-in
-  // type, a JSON number may be a float or double, which allows an exponent.
+  // The lexical form of a number: a decimal (`xml.decimal`, or the built-in type `xml.type` names) has no exponent,
+  // an integer type or a JSON integer has digits only, and any other number is a float or double, which may have one.
   const numberForm = (s: JsonSchema, type: string): RegExp => {
     const named = xmlOf(s, 'type');
     const builtin = named?.startsWith(`{${XS}}`) ? named.slice(XS.length + 2) : undefined;
-    if (builtin !== undefined && INTEGER_TYPES.has(builtin)) {
-      return INTEGER;
+    if (builtin === 'decimal' || xmlOf(s, 'decimal')) {
+      return DECIMAL;
     }
-    return builtin === 'decimal' || type === 'integer' ? DECIMAL : NUMBER;
+    return (builtin !== undefined && INTEGER_TYPES.has(builtin)) || type === 'integer' ? INTEGER : NUMBER;
   };
 
   // An array of elements, not the items of a list.
@@ -371,21 +412,68 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
 
   // Whether an object can hold all these properties at once, going by what its choices exclude.
   const allows = (s: JsonSchema, keys: string[]): boolean =>
-    keys.every((key) => s.properties?.[key] !== false) &&
+    keys.every((key) => !s.properties || !Object.hasOwn(s.properties, key) || s.properties[key] !== false) &&
+    anchorsAllow(s, keys) &&
     (s.allOf ?? []).every((constraint) => allows(constraint, keys)) &&
     (!s.oneOf || s.oneOf.some((branch) => allows(branch, keys))) &&
     (!s.anyOf || s.anyOf.some((branch) => allows(branch, keys)));
 
+  // A choice written with anchors: exactly one branch requires each anchor, and the other properties of a branch
+  // need its anchor. Properties of two branches can't be there together.
+  const anchorsAllow = (s: JsonSchema, keys: string[]): boolean => {
+    const anchors = new Set(
+      (s.oneOf ?? []).flatMap((branch) =>
+        branch.required?.length === 1 && Object.keys(branch).length === 1 ? branch.required : [],
+      ),
+    );
+    if (anchors.size === 0) {
+      return true;
+    }
+    const own = (key: string) =>
+      (s.dependentRequired && Object.hasOwn(s.dependentRequired, key) ? s.dependentRequired[key]?.[0] : undefined) ??
+      key;
+    return new Set(keys.map(own).filter((anchor) => anchors.has(anchor))).size <= 1;
+  };
+
+  // The position of a property in document order. The members of a substitution group and the branches of a choice
+  // written with anchors share one particle: each starts at the position of the first.
+  const positions = new WeakMap<JsonSchema, Map<string, number>>();
+  const positionsOf = (target: JsonSchema): Map<string, number> => {
+    let known = positions.get(target);
+    if (known !== undefined) {
+      return known;
+    }
+    const order = Object.keys(target.properties ?? {});
+    known = new Map(order.map((key, i) => [key, i]));
+    for (const constraint of [target, ...(target.allOf ?? [])]) {
+      const branches = constraint.oneOf ?? constraint.anyOf;
+      const single = (b: JsonSchema) => b.required?.length === 1 && Object.keys(b).length === 1;
+      const none = (b: JsonSchema) =>
+        Object.keys(b).length === 1 && Object.values(b.properties ?? {}).every((v) => v === false);
+      if (!branches?.some(single) || !branches.every((b) => single(b) || none(b))) {
+        continue;
+      }
+      // The first property of each branch; the others of a branch keep their places after it.
+      const keys = branches.flatMap((b) => (single(b) ? (b.required ?? []) : [])).filter((key) => known.has(key));
+      const first = Math.min(...keys.map((key) => known?.get(key) ?? Infinity));
+      for (const key of keys) {
+        known.set(key, first);
+      }
+    }
+    positions.set(target, known);
+    return known;
+  };
+  const positionOf = (target: JsonSchema, key: string): number => positionsOf(target).get(key) ?? -1;
+
   // Whether a property can still come in this occurrence of a repeated group, or has to start the next one.
   const fits = (out: { [key: string]: Json }, target: JsonSchema, key: string): boolean => {
-    const order = Object.keys(target.properties ?? {});
-    const position = order.indexOf(key);
-    const last = Math.max(-1, ...Object.keys(out).map((other) => order.indexOf(other)));
+    const position = positionOf(target, key);
+    const last = Math.max(-1, ...Object.keys(out).map((other) => positionOf(target, other)));
     const prop = resolve(target.properties?.[key]);
     // A full repeated group can still finish its last occurrence.
     const room =
       isRepetition(prop) &&
-      (prop.xml?.group === true || ((out[key] as Json[] | undefined)?.length ?? 0) < (prop.maxItems ?? Infinity));
+      (prop.xml?.group === true || ((own(out, key) as Json[] | undefined)?.length ?? 0) < (prop.maxItems ?? Infinity));
     return (position > last || (position === last && room)) && allows(target, [...Object.keys(out), key]);
   };
 
@@ -395,8 +483,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
 
   // The properties that can take a child element, most likely first, and the one that declares it directly.
   const candidatesOf = (out: JsonObject, target: JsonSchema, child: Element, occurrence: boolean) => {
-    const order = Object.keys(target.properties ?? {});
-    const last = Math.max(-1, ...Object.keys(out).map((other) => order.indexOf(other)));
+    const last = Math.max(-1, ...Object.keys(out).map((other) => positionOf(target, other)));
     const declared = entriesOf(target).filter(
       ([key, p]) => isFor(key, p, child) || (p.xml?.group && declares(p.items ?? {}, child)),
     );
@@ -404,8 +491,8 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
       ([key, p]) => p.xml?.group && wildIn(p.items ?? {}) && !declared.some(([other]) => other === key),
     );
     const candidates = [...declared, ...wild];
-    const inOrder = candidates.filter(([key]) => order.indexOf(key) >= last);
-    const earlier = candidates.filter(([key]) => order.indexOf(key) < last);
+    const inOrder = candidates.filter(([key]) => positionOf(target, key) >= last);
+    const earlier = candidates.filter(([key]) => positionOf(target, key) < last);
     return {
       candidates: occurrence ? candidates.filter(([name]) => fits(out, target, name)) : [...inOrder, ...earlier],
       direct: declared.find(([, p]) => !p.xml?.group),
@@ -431,7 +518,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
       const prop = resolve(p);
       if (p.xml?.group) {
         const items = p.items ?? {};
-        const list = (out[key] as JsonObject[] | undefined) ?? [];
+        const list = (own(out, key) as JsonObject[] | undefined) ?? [];
         const current = list.at(-1);
         if (current && placeFirst(current, items, child, true)) {
           return true;
@@ -439,7 +526,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
         const next: JsonObject = {};
         if (list.length < (prop.maxItems ?? Infinity) && placeFirst(next, items, child, true)) {
           list.push(next);
-          out[key] = list;
+          put(out, key, list);
           return true;
         }
         const joined = current && join(current, items, child);
@@ -448,21 +535,21 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
           return true;
         }
       } else if (isRepetition(prop)) {
-        const list = (out[key] as Json[] | undefined) ?? [];
+        const list = (own(out, key) as Json[] | undefined) ?? [];
         list.push(element(child, prop.items ?? {}));
-        out[key] = list;
+        put(out, key, list);
         return true;
-      } else if (out[key] === undefined) {
-        out[key] = element(child, p);
+      } else if (!Object.hasOwn(out, key)) {
+        put(out, key, element(child, p));
         return true;
       }
     }
     if (occurrence && occurrenceTakes(out, target, child)) {
-      out[wildKey(child)] = generic(child);
+      put(out, wildKey(child), generic(child));
       return true;
     }
     if (direct && !occurrence && !target.xml?.anyElement) {
-      out[`#unknown:repeated ${direct[0]}`] = true;
+      put(out, `#unknown:repeated ${direct[0]}`, true);
       return true;
     }
     return false;
@@ -484,7 +571,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
       const prop = resolve(p);
       if (p.xml?.group) {
         const items = p.items ?? {};
-        const list = (out[key] as JsonObject[] | undefined) ?? [];
+        const list = (own(out, key) as JsonObject[] | undefined) ?? [];
         const current = list.at(-1);
         if (current) {
           for (const next of placements(current, items, child, true)) {
@@ -506,8 +593,8 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
         }
       } else if (isRepetition(prop)) {
         found = true;
-        yield { ...out, [key]: [...((out[key] as Json[] | undefined) ?? []), element(child, prop.items ?? {})] };
-      } else if (out[key] === undefined) {
+        yield { ...out, [key]: [...((own(out, key) as Json[] | undefined) ?? []), element(child, prop.items ?? {})] };
+      } else if (!Object.hasOwn(out, key)) {
         found = true;
         yield { ...out, [key]: element(child, p) };
       }
@@ -528,7 +615,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
     if (!target.xml?.anyElement || key === textProperty || Object.hasOwn(target.properties ?? {}, key)) {
       return undefined;
     }
-    const existing = out[key];
+    const existing = own(out, key);
     const value = generic(child);
     return {
       ...out,
@@ -540,16 +627,24 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
   // is compiled next to the whole schema, with its references made absolute.
   const readingChecks = new WeakMap<JsonSchema, ValidateFunction>();
   const accepts = (target: JsonSchema, json: JsonObject): boolean => {
-    let check = readingChecks.get(target);
-    if (check === undefined) {
-      check = ajvFor(schema).compile(absolute(target) as JsonSchema);
-      readingChecks.set(target, check);
+    // A schema or JSON nested deeper than Ajv's stack reaches can't be checked here; the first reading stands.
+    try {
+      let check = readingChecks.get(target);
+      if (check === undefined) {
+        check = ajvFor(schema).compile(absolute(target) as JsonSchema);
+        readingChecks.set(target, check);
+      }
+      return check(json);
+    } catch (e) {
+      if (e instanceof RangeError) {
+        return true;
+      }
+      throw e;
     }
-    return check(json);
   };
 
   const isControl = (a: Attr): boolean => a.name === 'xmlns' || a.prefix === 'xmlns' || a.namespaceURI === XSI;
-  const isTrue = (value: string | null): boolean => value !== null && ['true', '1'].includes(value.trim());
+  const isTrue = (value: string | null): boolean => value !== null && ['true', '1'].includes(xmlTrim(value));
 
   // The attributes of an element into `out`: declared ones by the schema, others under their local name as strings
   // if xs:anyAttribute takes them, else as `#unknown`.
@@ -561,12 +656,12 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
           nameOf(key, p) === a.localName && p.xml?.attribute && (p.xml.namespace ?? '') === (a.namespaceURI ?? ''),
       );
       if (match) {
-        out[match[0]] = value(a.value, match[1]);
+        put(out, match[0], value(a.value, match[1]));
       } else if (target.xml?.anyAttribute) {
         claim(out, target, wildKey(a), a);
-        out[wildKey(a)] = a.value;
+        put(out, wildKey(a), a.value);
       } else {
-        out[`#unknown:@${a.name}`] = a.value;
+        put(out, `#unknown:@${a.name}`, a.value);
       }
     }
   };
@@ -602,7 +697,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
     for (const [key, group] of groups) {
       claim(out, target, key, group[0] as Element);
       const values = group.map(generic);
-      out[key] = values.length === 1 ? (values[0] ?? '') : values;
+      put(out, key, values.length === 1 ? (values[0] ?? '') : values);
     }
   };
 
@@ -621,14 +716,19 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
     const open: JsonSchema = {};
     for (const a of own) {
       claim(out, open, wildKey(a), a);
-      out[wildKey(a)] = a.value;
+      put(out, wildKey(a), a.value);
     }
     if (elements.length === 0) {
-      out[textProperty] = text;
-    } else if (text.trim() !== '') {
-      out[textProperty] = [...node.childNodes]
-        .map((child) => markup(child, isElement(child) ? declarationsOf(child) : []))
-        .join('');
+      // Only attributes: the text property only where there is text.
+      if (text !== '') {
+        put(out, textProperty, text);
+      }
+    } else if (xmlTrim(text) !== '') {
+      put(
+        out,
+        textProperty,
+        [...node.childNodes].map((child) => markup(child, isElement(child) ? declarationsOf(child) : [])).join(''),
+      );
     } else {
       // Whitespace between children is formatting.
       children(elements, open, out);
@@ -642,15 +742,23 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
       throw new MappingError('nil-content', 'the element is nil and has content', pathOf(node));
     }
     const written = node.getAttributeNS(XSI, 'type');
-    const type = written !== null && written !== '' ? typeName(node, written.trim()) : undefined;
+    const type = written !== null && written !== '' ? typeName(node, xmlTrim(written)) : undefined;
     if (type === undefined && ![...node.attributes].some((a) => !isControl(a))) {
       return null;
     }
-    const form = (s.anyOf ?? []).find((branch) => branch.type === 'object') ?? { properties: {} };
+    // The nil form of the type xsi:type names, or one that needs no `#type`.
+    const objects = (s.anyOf ?? []).filter((branch) => branch.type === 'object');
+    const form = (type === undefined
+      ? objects.find((branch) => !branch.required?.includes('#type'))
+      : objects.find((branch) => {
+          const property = branch.properties?.['#type'];
+          return typeof property === 'object' && (property.const === type || property.enum?.includes(type));
+        })) ??
+      objects[0] ?? { properties: {} };
     const out: { [key: string]: Json } = type === undefined ? {} : { '#type': type };
     attributes(node, form, out);
     const text = entriesOf(form).find(([, p]) => p.xml?.text);
-    out[text?.[0] ?? textProperty] = null;
+    put(out, text?.[0] ?? textProperty, null);
     return out;
   };
 
@@ -690,7 +798,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
     const alternatives = typed(s);
     const written = node.getAttributeNS(XSI, 'type');
     if (written !== null && written !== '') {
-      const type = typeName(node, written.trim());
+      const type = typeName(node, xmlTrim(written));
       const match = alternatives.find((alternative) => {
         const property = resolve(alternative).properties?.['#type'];
         return typeof property === 'object' && (property.const === type || property.enum?.includes(type));
@@ -724,7 +832,7 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
   const element = (node: Element, s: JsonSchema, nillable = false): Json => {
     const written = node.hasAttributeNS(XSI, 'nil') ? node.getAttributeNS(XSI, 'nil') : null;
     if (s.xml?.nillable) {
-      if (written !== null && !['true', 'false', '1', '0'].includes(written.trim())) {
+      if (written !== null && !['true', 'false', '1', '0'].includes(xmlTrim(written))) {
         throw new MappingError('invalid-nil', `xsi:nil="${written}" is no boolean`, pathOf(node));
       }
       return isTrue(written) ? nilled(node, s) : element(node, s.anyOf?.[0] ?? {}, true);
@@ -754,10 +862,10 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
   // simple type has no object form.
   const anyContent = (node: Element, s: JsonSchema): Json => {
     const written = node.getAttributeNS(XSI, 'type');
-    if (written === null || written === '' || typeName(node, written.trim()) === `{${XS}}anyType`) {
+    if (written === null || written === '' || typeName(node, xmlTrim(written)) === `{${XS}}anyType`) {
       return valueConstraint(node, s)?.value ?? generic(node);
     }
-    const type = typeName(node, written.trim());
+    const type = typeName(node, xmlTrim(written));
     const definitions = Object.values(defs);
     const complex = definitions.find((d) => {
       const property = d.properties?.['#type'];
@@ -800,6 +908,15 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
       if (elements.length > 0) {
         return { '#unknown:children': elements.length };
       }
+      // A simple type has no attributes: one written there has no place.
+      const unknown = [...node.attributes].filter((a) => !isControl(a));
+      if (unknown.length > 0) {
+        const out: JsonObject = {};
+        for (const a of unknown) {
+          put(out, `#unknown:@${a.name}`, a.value);
+        }
+        return out;
+      }
       return valueConstraint(node, s)?.value ?? value(node.textContent ?? '', s);
     }
     const entries = entriesOf(target);
@@ -807,9 +924,11 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
     attributes(node, target, out);
     const textProp = entries.find(([, p]) => p.xml?.text);
     if (textProp?.[1].xml?.mixed) {
-      out[textProp[0]] = [...node.childNodes]
-        .map((child) => markup(child, isElement(child) ? declarationsOf(child) : []))
-        .join('');
+      put(
+        out,
+        textProp[0],
+        [...node.childNodes].map((child) => markup(child, isElement(child) ? declarationsOf(child) : [])).join(''),
+      );
       return out;
     }
     let text = '';
@@ -821,10 +940,13 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
         elements.push(child);
       }
     }
+    // White space between child elements is formatting; empty content has no room even for that.
+    const empty =
+      !target.xml?.anyElement && entries.every(([, p]) => p.xml?.attribute === true || p.xml?.xsiType === true);
     if (textProp) {
-      out[textProp[0]] = valueConstraint(node, textProp[1])?.value ?? value(text, textProp[1]);
-    } else if (text.trim() !== '') {
-      out['#unknown:text'] = text.trim();
+      put(out, textProp[0], valueConstraint(node, textProp[1])?.value ?? value(text, textProp[1]));
+    } else if (xmlTrim(text) !== '' || (empty && text !== '')) {
+      put(out, '#unknown:text', xmlTrim(text) === '' ? text : xmlTrim(text));
     }
     // The readings of the children, most likely first. Repeated groups can split the same elements into occurrences
     // in more than one way; the first reading the schema accepts counts, else the first one (XML Schema Part 1,
@@ -860,14 +982,22 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
         if (target.xml?.anyElement) {
           unplaced.push(child);
         } else {
-          likely[`#unknown:${child.nodeName}`] = true;
+          put(likely, `#unknown:${child.nodeName}`, true);
         }
       }
     }
     const reading = finish([likely, unplaced]);
     const grouped = entriesOf(target).some(([, p]) => p.xml?.group);
-    if (!grouped || elements.length > MAX_SEARCH_CHILDREN || accepts(target, reading)) {
+    if (!grouped || accepts(target, reading)) {
       return reading;
+    }
+    // Other readings can't be sought among so many children: say so instead of a reading that may be wrong.
+    if (elements.length > MAX_SEARCH_CHILDREN) {
+      throw new MappingError(
+        'reading-limit',
+        `the schema rejects the first reading of ${elements.length} children in repeated groups, and other readings are only sought among ${MAX_SEARCH_CHILDREN}`,
+        pathOf(node),
+      );
     }
     const stack: Iterator<Reading>[] = [choices(out, [], first)];
     let firstReading: JsonObject | undefined;
@@ -892,6 +1022,14 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
       if ((tried += 1) >= MAX_READINGS) {
         break;
       }
+    }
+    // Every reading tried: the schema accepts none, the document is invalid. Otherwise the search gave up.
+    if (stack.length > 0) {
+      throw new MappingError(
+        'reading-limit',
+        'the schema rejects every reading of the repeated groups the search could try within its limits',
+        pathOf(node),
+      );
     }
     return firstReading ?? reading;
   };

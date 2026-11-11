@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE schema [ <!ENTITY unused "text"> ]>
+<schema xmlns="http://www.w3.org/2001/XMLSchema" xmlns:ds="urn:test:ds" targetNamespace="urn:test:ds" elementFormDefault="qualified">
+  <annotation><documentation><![CDATA[&unused; is text here]]></documentation></annotation>
+  <element name="Sig" type="string"/>
+</schema>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Declared mixed content: the children are always a fragment under the text property, also with repeated groups
+     in the content model; the text property is always present, empty as "". -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:group name="cnt"><xs:choice><xs:element name="b" type="xs:string"/><xs:element name="i" type="xs:string"/></xs:choice></xs:group>
+  <xs:complexType name="Title" mixed="true">
+    <xs:group ref="cnt" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="id" type="xs:string"/>
+  </xs:complexType>
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="T" type="Title"/>
+        <xs:element name="L" type="Title"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

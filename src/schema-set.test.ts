@@ -234,6 +234,13 @@ describe('SchemaSet', () => {
     expect(three.problems.map((p) => p.message)).toEqual(['the schema set exceeds the limit of 3 documents']);
   });
 
+  it('takes limits only as a plain object', () => {
+    for (const bad of [5, 'x', [], null, new Date()]) {
+      expect(() => load({}, 'a.xsd', bad as unknown as Limits)).toThrow(TypeError);
+    }
+    expect(() => load({}, 'a.xsd', Object.create(null) as Limits)).not.toThrow();
+  });
+
   it('takes only positive safe integers as limits', () => {
     for (const bad of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
       expect(() => load({}, 'a.xsd', { maxDocuments: bad })).toThrow(TypeError);

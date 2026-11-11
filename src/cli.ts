@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
+import { isTextProperty } from './convert.js';
 import { convertFile } from './node.js';
 import { messageOf } from './problems.js';
 import type { Limits } from './schema-set.js';
@@ -111,8 +112,8 @@ export function run(argv: string[], io: Io = processIo): number {
     io.stderr('--date-time must be format or pattern\n');
     return 2;
   }
-  if (values['text-property'] === '') {
-    io.stderr('--text-property must not be empty\n');
+  if (!isTextProperty(values['text-property'])) {
+    io.stderr('--text-property must be an NCName other than __proto__, or #text\n');
     return 2;
   }
   const limits: Limits = {};

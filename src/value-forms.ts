@@ -1,3 +1,5 @@
+import type { JsonSchema } from './json-schema.js';
+
 // The lexical forms of one value (XML Schema Part 2, 2.3): enumeration and fixed compare values, not text. For the
 // types whose JSON value is a string although several spellings mean the same value, this writes all spellings of a
 // value as an ECMAScript pattern.
@@ -98,4 +100,39 @@ function numberForms(text: string, integer: boolean): string | undefined {
     return `${sign}0*${whole}`;
   }
   return `${sign}0*${whole}${fraction === '' ? '(?:\\.0*)?' : `\\.${fraction}0*`}`;
+}
+
+/**
+ * The JSON numbers that are the same xs:float as `value`: an xs:float is a 32-bit float (XML Schema Part 2, 3.2.4),
+ * so every double that rounds to the same float is equal to it. The range ends halfway to the next floats; a number
+ * right on an end rounds to the float with the even last bit, so the ends belong to the range when that is this one.
+ */
+export function float32Range(value: number): JsonSchema {
+  const float = Math.fround(value);
+  const view = new DataView(new ArrayBuffer(4));
+  view.setFloat32(0, float);
+  const bits = view.getUint32(0);
+  const at = (next: number): number => {
+    view.setUint32(0, next >>> 0);
+    return view.getFloat32(0);
+  };
+  const largest = 0x7f7fffff;
+  const tiny = 2 ** -149;
+  let up: number;
+  let down: number;
+  if (float === 0) {
+    up = tiny;
+    down = -tiny;
+  } else if (float > 0) {
+    up = bits === largest ? 2 ** 128 : at(bits + 1);
+    down = at(bits - 1);
+  } else {
+    up = at(bits - 1);
+    down = (bits & 0x7fffffff) === largest ? -(2 ** 128) : at(bits + 1);
+  }
+  const low = (down + float) / 2;
+  const high = (float + up) / 2;
+  return (bits & 1) === 0
+    ? { type: 'number', minimum: low, maximum: high }
+    : { type: 'number', exclusiveMinimum: low, exclusiveMaximum: high };
 }

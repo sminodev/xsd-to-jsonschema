@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { convert, type ConvertOptions, type ConvertResult } from './convert.js';
-import { effectiveLimits, FileTooLarge, isAbsoluteUri, type Limits } from './schema-set.js';
+import { type ConvertOptions, type ConvertResult, convertSchemas } from './convert.js';
+import { decodeSchema } from './encoding.js';
+import { effectiveLimits, FileTooLarge, isAbsoluteUri, type Limits, UnsafeLocation } from './schema-set.js';
 
 export * from './index.js';
 
@@ -38,27 +39,35 @@ export function convertFile(
     return { schema: undefined, problems: [{ code: 'unsafe-input', severity: 'error', message, file: entryFile }] };
   }
   const read = (path: string): string | undefined => {
-    if (isAbsoluteUri(path) || isAbsolute(path)) {
+    // A local path outside the base directory, or a file: URL, is refused; another URL is just not read.
+    if (/^file:/i.test(path) || (!isAbsoluteUri(path) && isAbsolute(path))) {
+      throw new UnsafeLocation('convertFile reads relative paths inside the base directory only');
+    }
+    if (isAbsoluteUri(path)) {
       throw new Error(
         'convertFile reads relative local paths only; pass a reader function to convert() to supply other documents',
       );
     }
     const candidate = resolve(base, ...path.split('/'));
     if (!inside(candidate)) {
-      throw new Error('the schema path leaves the base directory');
+      throw new UnsafeLocation('the schema path leaves the base directory');
     }
     if (!existsSync(candidate)) {
       return undefined;
     }
     const actual = realpathSync(candidate);
     if (!inside(actual)) {
-      throw new Error('the symbolic link leaves the base directory');
+      throw new UnsafeLocation('the symbolic link leaves the base directory');
     }
-    // UTF-8 text has as many bytes on disk as it is counted with, so the size decides before reading.
-    if (statSync(actual).size > maxFileBytes) {
+    // The limits count the bytes of the file, so its size decides before reading.
+    const size = statSync(actual).size;
+    if (size > maxFileBytes) {
       throw new FileTooLarge(`${path} exceeds ${maxFileBytes} bytes`);
     }
-    return readFileSync(actual, 'utf8');
+    sizes.set(path, size);
+    return decodeSchema(readFileSync(actual));
   };
-  return convert({ files: read, entry: relative(base, actualEntry).split(sep).join('/'), root, options, limits });
+  const sizes = new Map<string, number>();
+  const entryPath = relative(base, actualEntry).split(sep).join('/');
+  return convertSchemas({ files: read, entry: entryPath, root, options, limits }, (path) => sizes.get(path));
 }

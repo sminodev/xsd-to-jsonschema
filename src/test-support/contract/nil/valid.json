@@ -1,8 +1,22 @@
 {
   "D": null,
-  "A": { "kind": "x", "value": null },
-  "B": { "w": "EUR", "value": null },
+  "A": {
+    "kind": "x",
+    "value": null
+  },
+  "B": {
+    "w": "EUR",
+    "value": null
+  },
   "K": null,
-  "L": [1, null],
-  "N": 7
+  "L": [
+    1,
+    null
+  ],
+  "N": 7,
+  "P": {
+    "#type": "{urn:v:nil}D",
+    "extra": "e",
+    "value": null
+  }
 }

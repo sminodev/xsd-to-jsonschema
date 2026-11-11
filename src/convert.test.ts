@@ -1,9 +1,10 @@
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import { describe, expect, it } from 'vitest';
 import { convert } from './convert.js';
 import type { JsonSchema } from './json-schema.js';
 import type { Problem } from './problems.js';
 import { ajvFor } from './test-support/oracle.js';
-import { xmlToJson } from './test-support/xml-to-json.js';
+import { MappingError, xmlToJson } from './test-support/xml-to-json.js';
 
 const XS = 'xmlns:xs="http://www.w3.org/2001/XMLSchema"';
 
@@ -180,11 +181,26 @@ describe('convert', () => {
       });
     });
 
-    it('reject an unknown dateTime mode and an empty textProperty', () => {
+    it('reject an unknown dateTime mode and a textProperty from the space of the other keys', () => {
       expect(() => convert({ files, entry: 'a.xsd', options: { dateTime: 'x' as unknown as 'format' } })).toThrow(
         TypeError,
       );
-      expect(() => convert({ files, entry: 'a.xsd', options: { textProperty: '' } })).toThrow(TypeError);
+      for (const textProperty of [
+        '',
+        '{}value',
+        '@value',
+        '#type',
+        '#sequence',
+        '#choice:2',
+        '__proto__',
+        'a:b',
+        '1a',
+      ]) {
+        expect(() => convert({ files, entry: 'a.xsd', options: { textProperty } }), textProperty).toThrow(TypeError);
+      }
+      for (const textProperty of ['value', '#text', '_text', 'Content']) {
+        expect(() => convert({ files, entry: 'a.xsd', root: 'A', options: { textProperty } })).not.toThrow();
+      }
     });
   });
 
@@ -541,7 +557,7 @@ describe('convert', () => {
       expect(out?.properties).toEqual({
         '#type': { const: '{urn:t}Limited', xml: { xsiType: true } },
         currency: { type: 'string', xml: { attribute: true } },
-        value: { type: 'number', maximum: 100, xml: { text: true } },
+        value: { type: 'number', maximum: 100, xml: { text: true, decimal: true } },
       });
       expect(out?.required).toEqual(['currency', 'value']);
     });
@@ -965,6 +981,17 @@ describe('convert', () => {
       expect(judge(out, doc('<T>12:00:00.51</T>'))).toBe(false);
     });
 
+    it('compare a fixed xs:float as a 32-bit float: every number that rounds to it', () => {
+      const { schema: out, problems } = run('<xs:element name="A" type="xs:float" fixed="0.1"/>');
+      expect(problems).toEqual([]);
+      expect(out).toMatchObject({ default: 0.1 });
+      expect(out).not.toHaveProperty('const');
+      expect(judge(out, '<A xmlns="urn:t">0.10000000149011612</A>')).toBe(true);
+      expect(judge(out, '<A xmlns="urn:t">0.1000001</A>')).toBe(false);
+      expect(judge(out, '<A xmlns="urn:t">INF</A>')).toBe(false);
+      expect(judge(out, '<A xmlns="urn:t"/>')).toBe(true);
+    });
+
     it('leave out a fixed value of a union that a float or double member takes, with a warning', () => {
       const { schema: out, problems } = run(
         `<xs:element name="A" fixed="1.0"><xs:simpleType><xs:union memberTypes="xs:boolean xs:float"/></xs:simpleType></xs:element>`,
@@ -1011,6 +1038,27 @@ describe('convert', () => {
       expect(ajvFor(out ?? {})(json)).toBe(true);
     });
 
+    it('say when a reading of repeated groups among more than 500 children is not found, instead of a wrong one', () => {
+      const { schema: out } = run(
+        `<xs:element name="A"><xs:complexType>
+          <xs:sequence minOccurs="501" maxOccurs="unbounded"><xs:element name="B" type="xs:int" maxOccurs="2"/></xs:sequence>
+        </xs:complexType></xs:element>`,
+      );
+      // 600 B need at least 501 occurrences; the first reading takes two per occurrence, 300.
+      let error: unknown;
+      try {
+        xmlToJson(out ?? {}, `<A xmlns="urn:t">${'<B>1</B>'.repeat(600)}</A>`);
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(MappingError);
+      expect((error as MappingError).code).toBe('reading-limit');
+      expect((error as MappingError).limit).toBe(true);
+      // Fewer children: the search finds the reading.
+      const json = xmlToJson(out ?? {}, `<A xmlns="urn:t">${'<B>1</B>'.repeat(10)}</A>`);
+      expect(ajvFor(out ?? {})(json)).toBe(false);
+    });
+
     it('declare the namespace of an xsi:type value in a fragment of mixed content', () => {
       const { schema: out } = convert({
         files: {
@@ -1031,6 +1079,106 @@ describe('convert', () => {
         value:
           'text <c xmlns="urn:t" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:t="urn:t" xsi:type="t:D"/>',
       });
+    });
+  });
+
+  describe('deep and cyclic schemas', () => {
+    const xs = (body: string) => `<xs:schema ${XS}>${body}</xs:schema>`;
+    const run = (body: string) => convert({ files: { 'a.xsd': xs(body) }, entry: 'a.xsd', root: 'r' });
+    const nest = (n: number) => {
+      let s = '<xs:element name="leaf" type="xs:int"/>';
+      for (let i = 0; i < n; i += 1) {
+        s = `<xs:element name="e${i % 7}"><xs:complexType><xs:sequence>${s}</xs:sequence></xs:complexType></xs:element>`;
+      }
+      return s.replace(/^<xs:element name="e\d"/, '<xs:element name="r"');
+    };
+    const unionChain = (n: number) => {
+      let s = '<xs:simpleType name="U0"><xs:union memberTypes="xs:int xs:boolean"/></xs:simpleType>';
+      for (let i = 1; i <= n; i += 1) {
+        s += `<xs:simpleType name="U${i}"><xs:union memberTypes="U${i - 1} xs:date"/></xs:simpleType>`;
+      }
+      return `${s}<xs:element name="r" type="U${n}"/>`;
+    };
+    const nestedChoices = (n: number) =>
+      '<xs:element name="r"><xs:complexType><xs:sequence>' +
+      '<xs:choice maxOccurs="2">'.repeat(n) +
+      '<xs:element name="a" type="xs:int"/>' +
+      '</xs:choice>'.repeat(n) +
+      '</xs:sequence></xs:complexType></xs:element>';
+
+    it('report a list whose item type is the list itself as circular-type', () => {
+      const { problems } = run(
+        '<xs:simpleType name="A"><xs:list itemType="A"/></xs:simpleType><xs:element name="r" type="A"/>',
+      );
+      expect(codes(problems)).toEqual(['circular-type']);
+    });
+
+    it('write 500 nested anonymous types, the deep ones as definitions', () => {
+      const { schema: out, problems } = run(nest(500));
+      expect(problems).toEqual([]);
+      expect(Object.keys(out?.$defs ?? {}).length).toBeGreaterThan(0);
+      // The schema nests no deeper than 64 types in place, wherever the definitions start.
+      const depth = (value: unknown): number =>
+        value !== null && typeof value === 'object' ? 1 + Math.max(0, ...Object.values(value).map(depth)) : 0;
+      expect(Math.max(...Object.values(out?.$defs ?? {}).map(depth))).toBeLessThan(400);
+    });
+
+    it('give no schema but resource-limit for what nests deeper than the converter can follow', () => {
+      for (const body of [nest(3000), nestedChoices(3000)]) {
+        const { schema: out, problems } = run(body);
+        expect(out).toBeUndefined();
+        expect(codes(problems)).toEqual(['resource-limit']);
+      }
+    });
+
+    it('write a chain of 500 unions in well under a second, and read a value of it', () => {
+      const started = performance.now();
+      const { schema: out } = run(unionChain(500));
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(xmlToJson(out ?? {}, '<r>1</r>')).toBe('1');
+    });
+
+    it('write a chain of 500 unions as flat branches, which Ajv with its defaults compiles in well under a second', () => {
+      const { schema: out } = run(unionChain(500));
+      const chain = out?.$defs?.['U500'];
+      expect(chain?.anyOf).toHaveLength(502);
+      expect(chain?.anyOf?.every((branch) => branch.anyOf === undefined && branch.$ref === undefined)).toBe(true);
+      for (const ajv of [
+        () => ajvFor(out ?? {}),
+        () =>
+          new Ajv2020().compile(
+            convert({ files: { 'a.xsd': xs(unionChain(500)) }, entry: 'a.xsd', root: 'r', options: { xml: false } })
+              .schema ?? {},
+          ),
+      ]) {
+        const started = performance.now();
+        ajv();
+        expect(performance.now() - started).toBeLessThan(1000);
+      }
+    });
+
+    it('refer to a named union with facets of its own instead of nesting it', () => {
+      const { schema: out } = run(
+        `<xs:simpleType name="Short"><xs:restriction><xs:simpleType><xs:union memberTypes="xs:int xs:boolean"/></xs:simpleType><xs:pattern value=".{1,5}"/></xs:restriction></xs:simpleType>
+        <xs:simpleType name="U"><xs:union memberTypes="Short xs:date"/></xs:simpleType><xs:element name="r" type="U"/>`,
+      );
+      expect(out?.$defs?.['U']?.anyOf?.[0]).toEqual({ $ref: '#/$defs/Short' });
+      expect(xmlToJson(out ?? {}, '<r> true </r>')).toBe('true');
+    });
+
+    it('never let a union that contains itself refer to its own definition', () => {
+      const { schema: out, problems } = run(
+        `<xs:simpleType name="U"><xs:union memberTypes="V xs:int"/></xs:simpleType>
+        <xs:simpleType name="V"><xs:union memberTypes="U xs:date"/></xs:simpleType><xs:element name="r" type="U"/>`,
+      );
+      expect(problems.map((p) => p.code)).toContain('circular-type');
+      expect(JSON.stringify(out?.$defs)).not.toContain('$ref');
+      expect(xmlToJson(out ?? {}, '<r>1</r>')).toBe('1');
+    });
+
+    it('read a document of 500 nested repeated choices without an exception', () => {
+      const { schema: out } = run(nestedChoices(500));
+      expect(() => xmlToJson(out ?? {}, '<r><a>1</a></r>')).not.toThrow();
     });
   });
 });

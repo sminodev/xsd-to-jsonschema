@@ -1,4 +1,5 @@
 import { Emitter, type EmitterOptions } from './emitter.js';
+import { NAME_CHAR, NAME_START } from './name-chars.js';
 import type { JsonSchema } from './json-schema.js';
 import { type Problem, Problems } from './problems.js';
 import { clark, type Component, type Limits, type SchemaDocument, SchemaSet, type SchemaSource } from './schema-set.js';
@@ -42,8 +43,28 @@ export interface ConvertResult {
   problems: Problem[];
 }
 
+// An NCName: a Name of XML 1.0, Second Edition, without a colon.
+const NCNAME = new RegExp(`^(?!.*:)[${NAME_START}][${NAME_CHAR}]*$`, 'u');
+
+/** Whether a name may be the text property: an NCName other than `__proto__`, or exactly `#text`. */
+export function isTextProperty(name: string): boolean {
+  return name === '#text' || (name !== '__proto__' && NCNAME.test(name));
+}
+
 /** Converts the XML Schema of one root element into a JSON Schema 2020-12 document. */
-export function convert({ files, entry, root, options = {}, limits }: ConvertInput): ConvertResult {
+export function convert(input: ConvertInput): ConvertResult {
+  return convertSchemas(input);
+}
+
+/**
+ * `convert`, for readers that know the size of each document in its file (`convertFile`).
+ *
+ * @param sizeOf - the bytes of a document in its file, which the size limits count
+ */
+export function convertSchemas(
+  { files, entry, root, options = {}, limits }: ConvertInput,
+  sizeOf?: (path: string) => number | undefined,
+): ConvertResult {
   const settings: EmitterOptions = {
     dateTime: options.dateTime ?? 'pattern',
     xml: options.xml ?? true,
@@ -52,17 +73,28 @@ export function convert({ files, entry, root, options = {}, limits }: ConvertInp
   if (settings.dateTime !== 'format' && settings.dateTime !== 'pattern') {
     throw new TypeError(`options.dateTime must be "format" or "pattern", not ${String(settings.dateTime)}`);
   }
-  if (typeof settings.textProperty !== 'string' || settings.textProperty === '') {
-    throw new TypeError('options.textProperty must be a non-empty string');
+  // An NCName, never one of the other kinds of keys ({ns}local, @local, #type, group keys), or exactly #text.
+  if (typeof settings.textProperty !== 'string' || !isTextProperty(settings.textProperty)) {
+    throw new TypeError('options.textProperty must be an NCName other than __proto__, or #text');
   }
   const problems = new Problems();
-  const set = new SchemaSet(files, problems, limits);
+  const set = new SchemaSet(files, problems, limits, sizeOf);
   const doc = set.load(entry);
   const element = doc && findRoot(set, doc, root, problems);
   if (!element || set.blocked) {
     return { schema: undefined, problems: problems.list };
   }
-  const schema = new Emitter(set, problems, settings).root(element);
+  let schema: JsonSchema;
+  try {
+    schema = new Emitter(set, problems, settings).root(element);
+  } catch (e) {
+    // A schema that nests deeper than the converter's stack reaches gives no schema rather than an exception.
+    if (!(e instanceof RangeError)) {
+      throw e;
+    }
+    problems.error('resource-limit', 'the schema nests deeper than the converter can follow', { file: doc.path });
+    return { schema: undefined, problems: problems.list };
+  }
   return { schema, problems: problems.list };
 }
 

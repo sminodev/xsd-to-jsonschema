@@ -149,7 +149,7 @@ export class Polymorphism {
       return undefined;
     }
     seen.add(node);
-    const head = (attr(node, 'substitutionGroup') ?? '').split(/\s+/).find((q) => q.length > 0);
+    const head = (attr(node, 'substitutionGroup') ?? '').split(/[ \t\n\r]+/).find((q) => q.length > 0);
     const found = head === undefined ? undefined : this.set.lookup('element', this.set.resolveQName(node, head));
     return found ? this.typeName(found.node, seen) : undefined;
   }
@@ -184,7 +184,9 @@ export class Polymorphism {
       add(clark(XS, base), clark(XS, local), 'restriction');
     }
     for (const member of this.set.components.element.values()) {
-      for (const head of (attr(member.node, 'substitutionGroup') ?? '').split(/\s+/).filter((q) => q.length > 0)) {
+      for (const head of (attr(member.node, 'substitutionGroup') ?? '')
+        .split(/[ \t\n\r]+/)
+        .filter((q) => q.length > 0)) {
         const name = this.set.resolveQName(member.node, head);
         const id = clark(name.ns, name.local);
         this.members.set(id, [...(this.members.get(id) ?? []), member]);
@@ -226,7 +228,7 @@ export class Polymorphism {
   private unionMembers(id: string): string[] {
     const found = this.set.components.simpleType.get(id);
     const union = found && xsChild(found.node, 'union');
-    return (union ? (attr(union, 'memberTypes') ?? '').split(/\s+/) : [])
+    return (union ? (attr(union, 'memberTypes') ?? '').split(/[ \t\n\r]+/) : [])
       .filter((q) => q.length > 0)
       .map((q) => {
         const name = this.set.resolveQName(union as Element, q);
@@ -280,5 +282,5 @@ const isTrue = (value: string | undefined): boolean => value === 'true' || value
 /** The derivation methods a declaration blocks, from its block attribute or the blockDefault of its schema. */
 export function blockedBy(node: Element, doc: SchemaDocument): string[] {
   const value = attr(node, 'block') ?? attr(doc.root, 'blockDefault') ?? '';
-  return value.includes('#all') ? ['extension', 'restriction', 'substitution'] : value.split(/\s+/);
+  return value.includes('#all') ? ['extension', 'restriction', 'substitution'] : value.split(/[ \t\n\r]+/);
 }

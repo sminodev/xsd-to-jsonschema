@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { JsonSchema } from './json-schema.js';
 import { Problems } from './problems.js';
 import { SchemaSet } from './schema-set.js';
 import { lexicalToJson, SimpleTypes, type SimpleTypeOptions } from './simple-types.js';
@@ -13,9 +14,23 @@ function types(body: string, options: SimpleTypeOptions = { dateTime: 'format' }
   );
   set.load('t.xsd');
   const simple = new SimpleTypes(set, problems, options);
+  // The facet tests leave out `xml.decimal`, which a test of its own checks.
+  const plain = (schema: JsonSchema): JsonSchema => {
+    if (!schema.xml?.decimal) {
+      return schema;
+    }
+    const xml = { ...schema.xml };
+    delete xml.decimal;
+    const out: JsonSchema = { ...schema, xml };
+    if (Object.keys(xml).length === 0) {
+      delete out.xml;
+    }
+    return out;
+  };
   return {
-    schema: (local: string) => simple.schema({ ns: 'urn:t', local }),
-    builtin: (local: string) => simple.schema({ ns: XS, local }),
+    schema: (local: string) => plain(simple.schema({ ns: 'urn:t', local })),
+    builtin: (local: string) => plain(simple.schema({ ns: XS, local })),
+    marked: (local: string) => simple.schema({ ns: 'urn:t', local }),
     codes: () => problems.list.map((p) => p.code),
   };
 }
@@ -71,6 +86,19 @@ describe('SimpleTypes', () => {
       restriction('Count', 'xs:unsignedByte', '<xs:minExclusive value="0"/><xs:maxInclusive value="99"/>'),
     );
     expect(t.schema('Count')).toEqual({ type: 'integer', exclusiveMinimum: 0, maximum: 99 });
+  });
+
+  it('marks numbers of xs:decimal and its restrictions with xml.decimal, not integer, float or double', () => {
+    const t = types(
+      restriction('Amount', 'xs:decimal', '<xs:minInclusive value="0"/>') +
+        restriction('Whole', 'xs:decimal', '<xs:fractionDigits value="0"/>') +
+        restriction('Count', 'xs:int', '<xs:minInclusive value="0"/>') +
+        restriction('Ratio', 'xs:double', '<xs:minInclusive value="0"/>'),
+    );
+    expect(t.marked('Amount').xml).toEqual({ decimal: true });
+    expect(t.marked('Whole')).toMatchObject({ type: 'integer', xml: { decimal: true } });
+    expect(t.marked('Count').xml).toBeUndefined();
+    expect(JSON.stringify(t.marked('Ratio'))).not.toContain('decimal');
   });
 
   it('turns fractionDigits into multipleOf and finite decimal digit limits into alternatives', () => {

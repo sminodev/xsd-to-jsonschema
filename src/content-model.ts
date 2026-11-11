@@ -110,9 +110,11 @@ export function occurs(node: Element): { min: number; max: number } {
 
 /** Writes the choices of a fragment into an object schema: one `oneOf` directly, several as an `allOf`. */
 export function addConstraints(schema: JsonSchema, constraints: JsonSchema[]): void {
-  if (constraints.length === 1) {
-    Object.assign(schema, constraints[0]);
-  } else if (constraints.length > 1) {
+  const [only] = constraints;
+  // One constraint joins the schema, unless a keyword of it is there already.
+  if (constraints.length === 1 && only && Object.keys(only).every((key) => !Object.hasOwn(schema, key))) {
+    Object.assign(schema, only);
+  } else if (constraints.length > 0) {
     schema.allOf = constraints;
   }
 }
@@ -183,8 +185,19 @@ function relaxConstraint(schema: JsonSchema, key: string): boolean {
     }
     changed = true;
   }
+  if (schema.dependentSchemas?.[key] !== undefined) {
+    delete schema.dependentSchemas[key];
+    if (Object.keys(schema.dependentSchemas).length === 0) {
+      delete schema.dependentSchemas;
+    }
+    changed = true;
+  }
   let removed = false;
   for (const branch of [...(schema.oneOf ?? []), ...(schema.anyOf ?? []), ...(schema.allOf ?? [])]) {
+    // An anchor that also occurs outside the choice no longer tells its branches apart.
+    if (branch.required?.length === 1 && branch.required[0] === key && Object.keys(branch).length === 1) {
+      removed = true;
+    }
     if (branch.properties?.[key] !== undefined) {
       delete branch.properties[key];
       if (Object.keys(branch.properties).length === 0) {
@@ -370,8 +383,14 @@ export class ContentModel {
       this.addProp(fragment, { ...prop, schema: occurrences.array(0, max), occurrences });
       keys.push(prop.key);
     }
-    if (min > 0 && keys.length > 0) {
-      fragment.constraints.push({ anyOf: keys.map((key) => ({ required: [key] })) });
+    // The members share one particle: at least one of them if it is required. Optional, the branch without any of
+    // them says the same, so that a reader still sees which properties belong to the particle.
+    if (keys.length > 0) {
+      const alternatives: JsonSchema[] = keys.map((key) => ({ required: [key] }));
+      if (min === 0) {
+        alternatives.push({ properties: Object.fromEntries(keys.map((key) => [key, false])) });
+      }
+      fragment.constraints.push({ anyOf: alternatives });
     }
   }
 
@@ -542,6 +561,10 @@ export class ContentModel {
       }
     }
     const empty = branches.filter((b) => this.canBeEmpty(b.fragment));
+    const shared = fragment.props.some((prop) => branches.filter((b) => hasKey(b.fragment, prop.key)).length > 1);
+    if (!shared && empty.length === 0 && branches.every((b) => b.fragment.required.length > 0)) {
+      return this.anchoredChoice(fragment, branches, optional);
+    }
     const alternatives = branches.map(({ fragment: branch }) => {
       const schema: JsonSchema = {};
       if (branch.required.length > 0) {
@@ -561,10 +584,61 @@ export class ContentModel {
       alternatives.push({ properties: Object.fromEntries(fragment.props.map((prop) => [prop.key, false])) });
     }
     // Branches that share a property or can both be empty can match together; what only one branch has still keeps
-    // the others out.
-    const shared = fragment.props.some((prop) => branches.filter((b) => hasKey(b.fragment, prop.key)).length > 1);
+    // the others out. This form grows with the square of the number of branches.
     const constraint: JsonSchema = shared || empty.length > 1 ? { anyOf: alternatives } : { oneOf: alternatives };
     if (optional || empty.length > 0) {
+      this.optionalChoices.add(constraint);
+    }
+    fragment.constraints.push(constraint);
+    return fragment;
+  }
+
+  /**
+   * A choice whose branches each require a property and share none, written in a size that grows linearly with the
+   * branches: each branch has an anchor, its first required property. Exactly one anchor is there (`oneOf`), or none
+   * for an optional choice; every other property of a branch needs the anchor of its branch (`dependentRequired`);
+   * and with its anchor, the rest of a branch applies (`dependentSchemas`).
+   */
+  private anchoredChoice(
+    fragment: Fragment,
+    branches: { fragment: Fragment; node: Element }[],
+    optional: boolean,
+  ): Fragment {
+    const anchors: string[] = [];
+    const dependentRequired: Record<string, string[]> = {};
+    const dependentSchemas: Record<string, JsonSchema> = {};
+    for (const { fragment: branch } of branches) {
+      const anchor = branch.required[0] ?? '';
+      anchors.push(anchor);
+      for (const prop of branch.props) {
+        if (prop.key !== anchor) {
+          dependentRequired[prop.key] = [anchor];
+        }
+      }
+      const rest: JsonSchema = {};
+      if (branch.required.length > 1) {
+        rest.required = branch.required.slice(1);
+      }
+      if (Object.keys(branch.dependentRequired).length > 0) {
+        rest.dependentRequired = branch.dependentRequired;
+      }
+      addConstraints(rest, branch.constraints);
+      if (Object.keys(rest).length > 0) {
+        dependentSchemas[anchor] = rest;
+      }
+    }
+    const alternatives: JsonSchema[] = anchors.map((anchor) => ({ required: [anchor] }));
+    if (optional) {
+      alternatives.push({ properties: Object.fromEntries(anchors.map((anchor) => [anchor, false])) });
+    }
+    const constraint: JsonSchema = { oneOf: alternatives };
+    if (Object.keys(dependentRequired).length > 0) {
+      constraint.dependentRequired = dependentRequired;
+    }
+    if (Object.keys(dependentSchemas).length > 0) {
+      constraint.dependentSchemas = dependentSchemas;
+    }
+    if (optional) {
       this.optionalChoices.add(constraint);
     }
     fragment.constraints.push(constraint);

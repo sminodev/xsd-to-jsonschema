@@ -76,9 +76,12 @@ describe('convertFile and the command line', () => {
     const badMode = capture();
     expect(run([main, '--date-time', 'x'], badMode.io)).toBe(2);
 
-    const emptyText = capture();
-    expect(run([main, '--root', 'A', '--text-property', ''], emptyText.io)).toBe(2);
-    expect(emptyText.out.stderr).toBe('--text-property must not be empty\n');
+    for (const bad of ['', '{}value', '@value', '#type', '#sequence', '__proto__', 'a:b']) {
+      const badText = capture();
+      expect(run([main, '--root', 'A', '--text-property', bad], badText.io), bad).toBe(2);
+      expect(badText.out.stderr).toBe('--text-property must be an NCName other than __proto__, or #text\n');
+    }
+    expect(run([main, '--root', 'A', '--text-property', '#text'], capture().io)).toBe(0);
   });
 
   it('only treats warnings as failure with --strict and keeps diagnostics on stderr', () => {
@@ -138,15 +141,20 @@ describe('convertFile and the command line', () => {
 
     afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-    it('refuses a relative path that leaves it', () => {
-      const { problems } = convertFile(entryFor('../outside/t.xsd'));
-      expect(problems[0]).toMatchObject({ code: 'missing-file' });
+    it('refuses a relative path that leaves it, and writes no partial schema', () => {
+      const { schema, problems } = convertFile(entryFor('../outside/t.xsd'));
+      expect(problems[0]).toMatchObject({ code: 'unsafe-input' });
       expect(problems[0]?.message).toContain('leaves the base directory');
+      expect(schema).toBeUndefined();
     });
 
-    it('refuses a file: URL and a symbolic link that leaves it', () => {
+    it('refuses a file: URL, an absolute path and a symbolic link that leaves it, without a schema', () => {
       const url = pathToFileURL(join(root, 'outside', 't.xsd')).href;
-      expect(convertFile(entryFor(url)).problems[0]?.message).toContain('relative local paths only');
+      for (const location of [url, join(root, 'outside', 't.xsd'), 'link.xsd']) {
+        const { schema, problems } = convertFile(entryFor(location));
+        expect(problems[0], location).toMatchObject({ code: 'unsafe-input' });
+        expect(schema, location).toBeUndefined();
+      }
       expect(convertFile(entryFor('link.xsd')).problems[0]?.message).toContain('symbolic link leaves');
     });
 

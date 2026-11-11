@@ -164,22 +164,24 @@
       "DiscountCode"
     ]
   },
-  "oneOf": [
+  "allOf": [
     {
-      "required": [
-        "Pickup"
+      "oneOf": [
+        {
+          "required": [
+            "Pickup"
+          ]
+        },
+        {
+          "required": [
+            "DeliveryDate"
+          ]
+        }
       ],
-      "properties": {
-        "DeliveryDate": false,
-        "DeliveryTime": false
-      }
-    },
-    {
-      "required": [
-        "DeliveryDate"
-      ],
-      "properties": {
-        "Pickup": false
+      "dependentRequired": {
+        "DeliveryTime": [
+          "DeliveryDate"
+        ]
       }
     }
   ],
@@ -253,6 +255,7 @@
       "minimum": 0,
       "maximum": 100,
       "xml": {
+        "decimal": true,
         "type": "{urn:example:common}Percent"
       }
     },
@@ -402,7 +405,8 @@
         "value": {
           "type": "number",
           "xml": {
-            "text": true
+            "text": true,
+            "decimal": true
           }
         }
       },
@@ -429,6 +433,7 @@
       "exclusiveMinimum": 0,
       "maximum": 100000,
       "xml": {
+        "decimal": true,
         "type": "{urn:example:common}Kilogram"
       }
     },

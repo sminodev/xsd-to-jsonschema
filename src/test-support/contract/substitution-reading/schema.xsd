@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The head and the members of a substitution group share the position of their particle. A member before `sep`
+     belongs to `H{1,4}`, not to the later repeated choice, even though that choice contains the same head. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="H" type="xs:string"/>
+  <xs:element name="M" type="xs:string" substitutionGroup="H"/>
+  <xs:element name="r">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="H" maxOccurs="4"/>
+        <xs:element name="sep" type="xs:int"/>
+        <xs:choice maxOccurs="3">
+          <xs:element ref="H"/>
+          <xs:element name="x" type="xs:int"/>
+        </xs:choice>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

@@ -1560,7 +1560,7 @@ describe('convert: XML Schema and JSON Schema agree', () => {
       otherKind: [instance('<Kind>ab</Kind>'), false],
     });
     expect(problems).toEqual([]);
-    expect((def(out, 'Euro').properties?.['value'] as JsonSchema).xml).toEqual({ text: true });
+    expect((def(out, 'Euro').properties?.['value'] as JsonSchema).xml).toEqual({ text: true, decimal: true });
     expect((def(out, 'Squeezed').properties?.['value'] as JsonSchema).xml).toEqual({
       text: true,
       whiteSpace: 'collapse',
@@ -2364,5 +2364,161 @@ describe('convert: XML Schema and JSON Schema agree', () => {
     });
     expect(verdicts.find((v) => v.name === 'all')?.value).toEqual({ a: '-INF', D: ['INF', '-INF', 'NaN', 1000] });
     expect(verdicts.find((v) => v.name === 'list')?.value).toEqual({ L: [1, 'INF', '-INF', 'NaN'] });
+  });
+
+  it('on xs:float enumerations: values compare as 32-bit floats', async () => {
+    const files = {
+      'float.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="F" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType>
+						<xs:restriction base="xs:float"><xs:enumeration value="0.1"/><xs:enumeration value="3"/></xs:restriction>
+					</xs:simpleType>
+				</xs:element>
+				<xs:element name="D" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType><xs:restriction base="xs:double"><xs:enumeration value="0.1"/></xs:restriction></xs:simpleType>
+				</xs:element>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    await check(files, {
+      same: [instance('<F>0.1</F><F>0.10000000149011612</F><F>0.1000000001</F><F>3.0000001</F>'), true],
+      other: [instance('<F>0.1000001</F>'), false],
+      double: [instance('<D>0.1</D>'), true],
+      doubleOther: [instance('<D>0.10000000149011612</D>'), false],
+    });
+  });
+
+  it('on names such as __proto__, constructor and toString: ordinary properties of their own', async () => {
+    const files = {
+      'proto.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="__proto__" minOccurs="0">
+					<xs:complexType>
+						<xs:sequence><xs:element name="polluted" type="xs:string"/></xs:sequence>
+						<xs:attribute name="isAdmin" type="xs:boolean" use="required"/>
+					</xs:complexType>
+				</xs:element>
+				<xs:element name="constructor" type="xs:string"/>
+				<xs:element name="toString" type="xs:string" minOccurs="0"/>
+				<xs:element name="Ext" minOccurs="0">
+					<xs:complexType>
+						<xs:sequence><xs:any namespace="##any" processContents="skip" maxOccurs="unbounded"/></xs:sequence>
+						<xs:anyAttribute processContents="skip"/>
+					</xs:complexType>
+				</xs:element>
+			</xs:sequence>
+			<xs:attribute name="__proto__" type="xs:string"/>
+			<xs:attribute name="hasOwnProperty" type="xs:int"/>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const { schema: out, verdicts } = await check(files, {
+      all: [
+        instance(
+          '<__proto__ isAdmin="true"><polluted>x</polluted></__proto__><constructor>c</constructor><toString>t</toString>' +
+            '<Ext __proto__="a"><constructor>1</constructor><valueOf>2</valueOf></Ext>',
+          '__proto__="p" hasOwnProperty="1"',
+        ),
+        true,
+      ],
+      withoutConstructor: [instance('<toString>t</toString>'), false],
+      wrongAttribute: [instance('<constructor>c</constructor>', 'hasOwnProperty="x"'), false],
+    });
+    expect(Object.getOwnPropertyNames(out?.properties ?? {})).toEqual([
+      '@__proto__',
+      'hasOwnProperty',
+      '__proto__',
+      'constructor',
+      'toString',
+      'Ext',
+    ]);
+    const json = verdicts.find((v) => v.name === 'all')?.value as Record<string, unknown>;
+    expect(Object.getPrototypeOf(json)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyNames(json)).toEqual([
+      '@__proto__',
+      'hasOwnProperty',
+      '__proto__',
+      'constructor',
+      'toString',
+      'Ext',
+    ]);
+    expect(Object.getOwnPropertyNames(json['Ext'])).toEqual(['__proto__', 'constructor', 'valueOf']);
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
+
+  it('on xs:float bounds: they compare as 32-bit floats', async () => {
+    const files = {
+      'floatbounds.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="Range" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType>
+						<xs:restriction base="xs:float"><xs:minInclusive value="0.1"/><xs:maxInclusive value="0.3"/></xs:restriction>
+					</xs:simpleType>
+				</xs:element>
+				<xs:element name="Above" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType><xs:restriction base="xs:float"><xs:minExclusive value="0.1"/></xs:restriction></xs:simpleType>
+				</xs:element>
+				<xs:element name="Below" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType><xs:restriction base="xs:float"><xs:maxExclusive value="16777217"/></xs:restriction></xs:simpleType>
+				</xs:element>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    await check(files, {
+      inRange: [instance('<Range>0.30000001</Range><Range>0.09999999999</Range><Range>0.2</Range>'), true],
+      outOfRange: [instance('<Range>0.3000001</Range>'), false],
+      sameAsLowerBound: [instance('<Above>0.10000000149011612</Above>'), false],
+      roundsToLowerBound: [instance('<Above>0.1000000001</Above>'), false],
+      above: [instance('<Above>0.1000001</Above>'), true],
+      roundsToUpperBound: [instance('<Below>16777216</Below>'), false],
+      below: [instance('<Below>16777215</Below>'), true],
+    });
+  });
+
+  it('on what a simple or empty type has no room for: attributes, and white space in empty content', async () => {
+    const files = {
+      'room.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="S" type="xs:string" minOccurs="0"/>
+				<xs:element name="I" type="xs:int" nillable="true" minOccurs="0"/>
+				<xs:element name="E" type="Empty" minOccurs="0"/>
+				<xs:element name="C" minOccurs="0">
+					<xs:complexType><xs:sequence><xs:element name="X" type="xs:int"/></xs:sequence></xs:complexType>
+				</xs:element>
+				<xs:element name="N" minOccurs="0">
+					<xs:simpleType><xs:restriction base="xs:integer"><xs:maxInclusive value="10"/></xs:restriction></xs:simpleType>
+				</xs:element>
+				<xs:element name="Dec" minOccurs="0">
+					<xs:simpleType><xs:restriction base="xs:decimal"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType>
+				</xs:element>
+				<xs:element name="Whole" minOccurs="0">
+					<xs:simpleType><xs:restriction base="xs:decimal"><xs:fractionDigits value="0"/></xs:restriction></xs:simpleType>
+				</xs:element>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	<xs:complexType name="Empty"/>
+	<xs:complexType name="Derived"><xs:complexContent><xs:extension base="Empty"/></xs:complexContent></xs:complexType>`),
+    };
+    await check(files, {
+      plain: [instance('<S>t</S><I>1</I><E/><C> <X>1</X> </C><N>3</N><Dec>1.5</Dec><Whole>7.0</Whole>'), true],
+      attributeOnString: [instance('<S zz="1">t</S>'), false],
+      attributeOnInt: [instance('<I zz="1">1</I>'), false],
+      xmlLang: [instance('<S xml:lang="de">t</S>'), false],
+      spaceInEmpty: [instance('<E> </E>'), false],
+      fractionOfDerivedInteger: [instance('<N>1.0</N>'), false],
+      exponentOfDerivedDecimal: [instance('<Dec>1e3</Dec>'), false],
+    });
   });
 });

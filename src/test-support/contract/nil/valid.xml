@@ -1,1 +1,1 @@
-<R xmlns="urn:v:nil" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><D xsi:nil="true"/><A kind="x" xsi:nil="true"/><B w="EUR" xsi:nil="1"/><K xsi:nil="true"/><L>1</L><L xsi:nil="true"/><N xsi:nil="false">7</N></R>
+<R xmlns="urn:v:nil" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><D xsi:nil="true"/><A kind="x" xsi:nil="true"/><B w="EUR" xsi:nil="1"/><K xsi:nil="true"/><L>1</L><L xsi:nil="true"/><N xsi:nil="false">7</N><P xsi:type="D" extra="e" xsi:nil="true"/></R>

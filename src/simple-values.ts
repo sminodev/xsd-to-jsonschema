@@ -8,7 +8,7 @@ export function lexicalToJson(
   types: JsonType | JsonType[] | undefined,
   lexical: string,
 ): { value: unknown; rounded?: true } | { error: string } {
-  const text = lexical.trim();
+  const text = xmlTrim(lexical);
   // A number that may also be INF, -INF or NaN (xs:float, xs:double) writes those as strings.
   if (Array.isArray(types) && types.includes('string') && SPECIAL_VALUES.includes(text)) {
     return { value: text };
@@ -41,6 +41,14 @@ export function lexicalToJson(
 }
 
 const SPECIAL_VALUES = ['INF', '-INF', 'NaN'];
+
+/**
+ * Removes XML white space at both ends: space, tab, line feed and carriage return only (XML 1.0, 2.3). JavaScript's
+ * `trim()` also removes U+00A0 and other Unicode spaces, which are content in XML.
+ */
+export function xmlTrim(text: string): string {
+  return text.replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, '');
+}
 
 /** The type that decides how a value of several JSON types is converted: a number before a string. */
 export function primaryType(types: JsonType[]): JsonType | undefined {
