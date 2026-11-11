@@ -29,6 +29,7 @@
     <xs:restriction base="xs:decimal">
       <xs:fractionDigits value="2"/>
       <xs:minExclusive value="0"/>
+      <xs:maxInclusive value="100000"/>
     </xs:restriction>
   </xs:simpleType>
 

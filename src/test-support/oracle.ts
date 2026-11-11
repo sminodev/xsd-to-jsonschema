@@ -8,7 +8,7 @@ import { convert, type ConvertOptions } from '../convert.js';
 import { isMultipleOf } from '../decimal.js';
 import type { JsonSchema } from '../json-schema.js';
 import type { Problem } from '../problems.js';
-import { xmlToJson } from './xml-to-json.js';
+import { MappingError, xmlToJson } from './xml-to-json.js';
 
 export { isMultipleOf } from '../decimal.js';
 
@@ -84,7 +84,10 @@ export async function compare(input: {
       value = xmlToJson(schema, instances[name] ?? '', { textProperty: input.options?.textProperty ?? 'value' });
       json = validate(value);
     } catch (e) {
-      value = { error: e instanceof Error ? e.message : String(e) };
+      value =
+        e instanceof MappingError
+          ? { error: e.message, code: e.code }
+          : { error: e instanceof Error ? e.message : String(e) };
       json = false;
     }
     return {

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- xs:redefine of a group and an attribute group with a self-reference (extension). -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:v:red" targetNamespace="urn:v:red" elementFormDefault="qualified">
+  <xs:redefine schemaLocation="base.xsd">
+    <xs:group name="G"><xs:sequence><xs:group ref="G"/><xs:element name="b" type="xs:string"/></xs:sequence></xs:group>
+    <xs:attributeGroup name="AG"><xs:attributeGroup ref="AG"/><xs:attribute name="y" type="xs:string"/></xs:attributeGroup>
+  </xs:redefine>
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence><xs:group ref="G"/></xs:sequence>
+      <xs:attributeGroup ref="AG"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

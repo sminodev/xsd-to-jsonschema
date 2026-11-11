@@ -238,6 +238,7 @@ validation.
       "type": "number",
       "multipleOf": 0.01,
       "exclusiveMinimum": 0,
+      "maximum": 100000,
       "xml": { "type": "{urn:example:common}Kilogram" }
     }
   }

@@ -5,10 +5,15 @@ import type { At, Problems } from './problems.js';
 
 /** A lexical value as JSON; `rounded` says that a JSON number cannot hold it exactly. */
 export function lexicalToJson(
-  jsonType: JsonType | undefined,
+  types: JsonType | JsonType[] | undefined,
   lexical: string,
 ): { value: unknown; rounded?: true } | { error: string } {
   const text = lexical.trim();
+  // A number that may also be INF, -INF or NaN (xs:float, xs:double) writes those as strings.
+  if (Array.isArray(types) && types.includes('string') && SPECIAL_VALUES.includes(text)) {
+    return { value: text };
+  }
+  const jsonType = Array.isArray(types) ? primaryType(types) : types;
   if (jsonType === 'integer' || jsonType === 'number') {
     if (!/^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(text)) {
       return { error: `${lexical} is no number` };
@@ -20,7 +25,8 @@ export function lexicalToJson(
     if (jsonType === 'integer' && !Number.isInteger(value)) {
       return { error: `${lexical} is no integer` };
     }
-    return isExact(text, value) ? { value } : { value, rounded: true };
+    // A float or double is a double by definition; only decimals can lose digits.
+    return isExact(text, value) || Array.isArray(types) ? { value } : { value, rounded: true };
   }
   if (jsonType === 'boolean') {
     if (text === 'true' || text === '1') {
@@ -34,8 +40,34 @@ export function lexicalToJson(
   return { value: lexical };
 }
 
+const SPECIAL_VALUES = ['INF', '-INF', 'NaN'];
+
+/** The type that decides how a value of several JSON types is converted: a number before a string. */
+export function primaryType(types: JsonType[]): JsonType | undefined {
+  return types.find((t) => t === 'number' || t === 'integer') ?? types[0];
+}
+
 /** Why a value breaks the simple constraints of a schema, or undefined if it meets them. */
 export function violation(schema: JsonSchema, value: unknown): string | undefined {
+  if (Array.isArray(schema.type)) {
+    // A special value of a float is a string; it only has to be one the schema names.
+    if (typeof value === 'string') {
+      return schema.pattern && !new RegExp(schema.pattern, 'u').test(value)
+        ? `does not match ${schema.pattern}`
+        : schema.enum && !schema.enum.includes(value)
+          ? 'not in the base enumeration'
+          : undefined;
+    }
+    const numeric: JsonSchema = { ...schema };
+    delete numeric.pattern;
+    const primary = primaryType(schema.type);
+    if (primary === undefined) {
+      delete numeric.type;
+    } else {
+      numeric.type = primary;
+    }
+    return violation(numeric, value);
+  }
   const type = schema.type;
   if (
     (type === 'integer' && (typeof value !== 'number' || !Number.isInteger(value))) ||
@@ -66,11 +98,21 @@ export function violation(schema: JsonSchema, value: unknown): string | undefine
   return typeof value === 'number' ? numericViolation(schema, value) : undefined;
 }
 
-export function enumSchema(schema: JsonSchema, values: string[], problems: Problems, at?: At): JsonSchema {
+/**
+ * @param types - the JSON types the values convert to, if not the type of `schema`: `["number", "string"]` for a
+ * union with a float or double member, whose INF, -INF and NaN are strings
+ */
+export function enumSchema(
+  schema: JsonSchema,
+  values: string[],
+  problems: Problems,
+  at?: At,
+  types: JsonType | JsonType[] | undefined = schema.type,
+): JsonSchema {
   const json = schema.type;
   const kept: unknown[] = [];
   for (const lexical of values) {
-    const converted = lexicalToJson(json, lexical);
+    const converted = lexicalToJson(types, lexical);
     if ('error' in converted) {
       problems.error('invalid-facet', converted.error, at);
       continue;

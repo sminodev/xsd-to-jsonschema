@@ -4,3 +4,5 @@ examples/order/order.schema.json
 examples/order/order.json
 # the JSON contract cases shared with xsd-faker, kept byte for byte
 src/test-support/contract
+# the DOCTYPE cases shared with xsd-faker, kept byte for byte
+src/test-support/doctype

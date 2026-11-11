@@ -1,7 +1,7 @@
 import { Emitter, type EmitterOptions } from './emitter.js';
 import type { JsonSchema } from './json-schema.js';
 import { type Problem, Problems } from './problems.js';
-import { clark, type Component, type SchemaDocument, SchemaSet, type SchemaSource } from './schema-set.js';
+import { clark, type Component, type Limits, type SchemaDocument, SchemaSet, type SchemaSource } from './schema-set.js';
 
 export interface ConvertOptions {
   /**
@@ -28,6 +28,12 @@ export interface ConvertInput {
    */
   root?: string | undefined;
   options?: ConvertOptions | undefined;
+  /**
+   * Size limits of the schema set, each a positive safe integer: `maxFileBytes` per document (default 4194304),
+   * `maxTotalBytes` for all documents (default 16777216) and `maxDocuments` (default 128). Bytes count as UTF-8
+   * before parsing; a document loaded again for another namespace (chameleon include) counts again.
+   */
+  limits?: Limits | undefined;
 }
 
 export interface ConvertResult {
@@ -37,7 +43,7 @@ export interface ConvertResult {
 }
 
 /** Converts the XML Schema of one root element into a JSON Schema 2020-12 document. */
-export function convert({ files, entry, root, options = {} }: ConvertInput): ConvertResult {
+export function convert({ files, entry, root, options = {}, limits }: ConvertInput): ConvertResult {
   const settings: EmitterOptions = {
     dateTime: options.dateTime ?? 'pattern',
     xml: options.xml ?? true,
@@ -50,10 +56,10 @@ export function convert({ files, entry, root, options = {} }: ConvertInput): Con
     throw new TypeError('options.textProperty must be a non-empty string');
   }
   const problems = new Problems();
-  const set = new SchemaSet(files, problems);
+  const set = new SchemaSet(files, problems, limits);
   const doc = set.load(entry);
   const element = doc && findRoot(set, doc, root, problems);
-  if (!element) {
+  if (!element || set.blocked) {
     return { schema: undefined, problems: problems.list };
   }
   const schema = new Emitter(set, problems, settings).root(element);

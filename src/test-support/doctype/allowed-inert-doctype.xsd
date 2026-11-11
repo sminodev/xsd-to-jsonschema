@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE schema
+  PUBLIC "-//W3C//DTD XMLSchema 200102//EN" "http://www.w3.org/2001/XMLSchema.dtd"
+ [
+   <!ATTLIST schema
+     xmlns:ds CDATA #FIXED "urn:test:ds">
+   <!ENTITY dsig 'urn:test:ds'>
+   <!ENTITY % p ''>
+   <!ENTITY % s ''>
+   <!-- a comment in the subset -->
+  ]>
+<schema xmlns="http://www.w3.org/2001/XMLSchema" xmlns:ds="urn:test:ds" targetNamespace="urn:test:ds" elementFormDefault="qualified">
+  <element name="Sig" type="string"/>
+</schema>

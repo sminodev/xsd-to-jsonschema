@@ -18,9 +18,19 @@ function canonicalDecimal(text: string): string {
   return `${sign === '-' ? '-' : ''}${digits}e${Number(exponent) - fraction.length + raw.length - digits.length}`;
 }
 
-/** Whether a JSON number holds exactly the value of a decimal text. */
+/**
+ * Whether a JSON number holds the value of a decimal text so that it compares like the decimal: written back it is
+ * the same value, and no other decimal of the same precision becomes the same number. That holds for an integer up
+ * to 2^53 - 1 and for a fraction with at most 15 significant digits below that (IEEE 754 doubles keep 15 decimal
+ * digits apart); beyond, decimals next to the value round onto it.
+ */
 export function isExact(text: string, value: number): boolean {
-  return canonicalDecimal(text) === canonicalDecimal(String(value));
+  const canonical = canonicalDecimal(text);
+  if (canonical !== canonicalDecimal(String(value)) || Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+    return false;
+  }
+  const [digits = '', exponent = '0'] = canonical.replace(/^-/, '').split('e');
+  return Number(exponent) >= 0 || digits.length <= 15;
 }
 
 export function isMultipleOf(value: number, step: number): boolean {

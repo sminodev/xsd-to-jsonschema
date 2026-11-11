@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { convert, type ConvertOptions, type ConvertResult } from './convert.js';
-import { isAbsoluteUri, MAX_FILE_BYTES } from './schema-set.js';
+import { effectiveLimits, FileTooLarge, isAbsoluteUri, type Limits } from './schema-set.js';
 
 export * from './index.js';
 
@@ -11,6 +11,8 @@ export interface ConvertFileOptions {
   options?: ConvertOptions | undefined;
   /** The directory schemas may be read from. Default: the directory of the entry file. */
   baseDirectory?: string | undefined;
+  /** Size limits of the schema set; see `ConvertInput.limits`. */
+  limits?: Limits | undefined;
 }
 
 /**
@@ -20,8 +22,9 @@ export interface ConvertFileOptions {
  */
 export function convertFile(
   entryFile: string,
-  { root, options, baseDirectory }: ConvertFileOptions = {},
+  { root, options, baseDirectory, limits }: ConvertFileOptions = {},
 ): ConvertResult {
+  const { maxFileBytes } = effectiveLimits(limits);
   const entry = resolve(entryFile);
   const given = resolve(baseDirectory ?? dirname(entry));
   const base = existsSync(given) ? realpathSync(given) : given;
@@ -51,10 +54,11 @@ export function convertFile(
     if (!inside(actual)) {
       throw new Error('the symbolic link leaves the base directory');
     }
-    if (statSync(actual).size > MAX_FILE_BYTES) {
-      throw new Error('the schema exceeds the 2 MiB file limit');
+    // UTF-8 text has as many bytes on disk as it is counted with, so the size decides before reading.
+    if (statSync(actual).size > maxFileBytes) {
+      throw new FileTooLarge(`${path} exceeds ${maxFileBytes} bytes`);
     }
     return readFileSync(actual, 'utf8');
   };
-  return convert({ files: read, entry: relative(base, actualEntry).split(sep).join('/'), root, options });
+  return convert({ files: read, entry: relative(base, actualEntry).split(sep).join('/'), root, options, limits });
 }

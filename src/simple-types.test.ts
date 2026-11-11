@@ -81,7 +81,8 @@ describe('SimpleTypes', () => {
     );
     expect(t.schema('Amount')).toEqual({ type: 'number', multipleOf: 0.01 });
     expect(t.schema('Whole')).toEqual({ type: 'integer', exclusiveMinimum: -1000, exclusiveMaximum: 1000 });
-    expect(t.codes()).toEqual([]);
+    // Amount allows values with more than 15 significant digits, which JSON numbers round before the check.
+    expect(t.codes()).toEqual(['rounded-number']);
     expect(t.schema('Money')).toEqual({
       type: 'number',
       multipleOf: 0.01,
@@ -93,7 +94,7 @@ describe('SimpleTypes', () => {
       exclusiveMinimum: -1000000,
       exclusiveMaximum: 1000000,
     });
-    expect(t.codes()).toEqual([]);
+    expect(t.codes()).toEqual(['rounded-number']);
   });
 
   it('reports the remaining approximation when totalDigits has no fractionDigits limit', () => {
@@ -144,7 +145,7 @@ describe('SimpleTypes', () => {
       label: 'underflowing fractionDigits',
       facets: '<xs:fractionDigits value="324"/>',
       expected: { type: 'number' },
-      codes: ['unsupported-facet'],
+      codes: ['rounded-number', 'unsupported-facet'],
     },
     {
       label: 'overflowing totalDigits',
@@ -156,13 +157,13 @@ describe('SimpleTypes', () => {
       label: 'both unrepresentable digit facets',
       facets: '<xs:totalDigits value="324"/><xs:fractionDigits value="324"/>',
       expected: { type: 'number' },
-      codes: ['unsupported-facet', 'unsupported-facet'],
+      codes: ['rounded-number', 'unsupported-facet', 'unsupported-facet'],
     },
     {
       label: 'an unrepresentable scale with a representable bound',
       facets: '<xs:totalDigits value="6"/><xs:fractionDigits value="324"/>',
       expected: { type: 'number', exclusiveMinimum: -1000000, exclusiveMaximum: 1000000 },
-      codes: ['unsupported-facet', 'approximated-total-digits'],
+      codes: ['rounded-number', 'unsupported-facet', 'approximated-total-digits'],
     },
   ])('reports $label without writing invalid numeric constraints', ({ facets, expected, codes }) => {
     const t = types(restriction('Amount', 'xs:decimal', facets));

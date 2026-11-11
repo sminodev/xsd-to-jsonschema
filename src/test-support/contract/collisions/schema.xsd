@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Collision keys: the same local name from two namespaces (every partner becomes {ns}local), an attribute and an
+     element of the same name (the element stays local, the attribute becomes @local), and the text property name
+     reserved in every object: element {ns}value and attribute @value, also without text (Pair). Keys are planned from
+     the content model, not from the instance. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:v:a" xmlns:b="urn:v:b" targetNamespace="urn:v:a" elementFormDefault="qualified">
+  <xs:import namespace="urn:v:b" schemaLocation="b.xsd"/>
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="raceCode" type="xs:string"/>
+        <xs:element ref="b:raceCode" minOccurs="0"/>
+        <xs:element name="rows" type="xs:string"/>
+        <xs:element name="Pair" minOccurs="0">
+          <xs:complexType><xs:sequence><xs:element name="value" type="xs:string"/></xs:sequence><xs:attribute name="value" type="xs:string"/></xs:complexType>
+        </xs:element>
+        <xs:element name="Price" minOccurs="0">
+          <xs:complexType><xs:simpleContent><xs:extension base="xs:decimal"><xs:attribute name="value" type="xs:string"/></xs:extension></xs:simpleContent></xs:complexType>
+        </xs:element>
+      </xs:sequence>
+      <xs:attribute name="rows" type="xs:int"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

@@ -18,6 +18,7 @@
 
 import type { Element } from '@xmldom/xmldom';
 import type { JsonSchema } from './json-schema.js';
+import { planKeys, renameObject } from './keys.js';
 import type { Problems } from './problems.js';
 import { attr, type SchemaDocument, type SchemaSet, xsChildren } from './schema-set.js';
 
@@ -211,6 +212,8 @@ export class ContentModel {
     /** write the `xml` annotations */
     private readonly xml: boolean,
     private readonly substitutes: Substitutes = () => undefined,
+    /** the property for the text of an element, which an element name must not take */
+    private readonly textProperty = 'value',
   ) {}
 
   /** Adds the model group of a complex type or derivation (its sequence, all, choice or group) to `fragment`. */
@@ -374,7 +377,7 @@ export class ContentModel {
 
   private groupReference(node: Element, optional: boolean, seen: Set<Element>, keys: GroupKeys): Fragment | undefined {
     const ref = attr(node, 'ref') ?? '';
-    const found = this.set.lookup('group', this.set.resolveQName(node, ref));
+    const found = this.set.lookupRef('group', this.set.resolveQName(node, ref), node);
     if (!found) {
       this.problems.error('unknown-group', `group ${ref} is not defined`, this.set.at(node));
       return undefined;
@@ -400,12 +403,20 @@ export class ContentModel {
   private repeatedGroup(fragment: Fragment, node: Element, inner: Fragment, min: number, max: number): void {
     const definition =
       node.localName === 'group'
-        ? this.set.lookup('group', this.set.resolveQName(node, attr(node, 'ref') ?? ''))
+        ? this.set.lookupRef('group', this.set.resolveQName(node, attr(node, 'ref') ?? ''), node)
         : undefined;
     const key = fragment.groupKeys.keyOf(
       definition?.node ?? node,
       definition ? (attr(definition.node, 'name') ?? '') : (node.localName ?? ''),
     );
+    // The name of the text property is reserved in every object, such as `#text` for a group named text.
+    if (key === this.textProperty) {
+      this.problems.error(
+        'duplicate-name',
+        `the repeated group ${key} has the name of the text property, which every object reserves`,
+        this.set.at(node),
+      );
+    }
     const item: JsonSchema = { type: 'object' };
     writeObject(
       item,
@@ -414,6 +425,7 @@ export class ContentModel {
       inner,
       this.xml,
     );
+    renameObject(item, planKeys(Object.keys(item.properties ?? {}), this.textProperty), this.xml);
     const array = (low: number, high: number): JsonSchema => {
       const list: JsonSchema = { type: 'array', items: item };
       if (low > 0) {
@@ -501,6 +513,14 @@ export class ContentModel {
   /** The fragment of a choice between `branches`, as described for `choice`. */
   private choiceOf(branches: { fragment: Fragment; node: Element }[], optional: boolean, keys: GroupKeys): Fragment {
     const fragment = emptyFragment(keys);
+    // A choice without particles (all of them may occur 0 times) matches nothing (XML Schema Part 1, 3.8.4): left
+    // out, it adds nothing; required, no object meets it. JSON Schema has no empty `oneOf`.
+    if (branches.length === 0) {
+      if (!optional) {
+        fragment.constraints.push({ not: {} });
+      }
+      return fragment;
+    }
     for (const { fragment: branch } of branches) {
       addWildcards(fragment, branch);
     }

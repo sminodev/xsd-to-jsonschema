@@ -1,0 +1,14 @@
+{
+  "@rows": 3,
+  "{urn:v:a}raceCode": "x",
+  "{urn:v:b}raceCode": "y",
+  "rows": "r",
+  "Pair": {
+    "@value": "a",
+    "{urn:v:a}value": "e"
+  },
+  "Price": {
+    "@value": "v",
+    "value": 4.5
+  }
+}

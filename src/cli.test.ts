@@ -164,11 +164,40 @@ describe('convertFile and the command line', () => {
       expect(problems).toEqual([expect.objectContaining({ code: 'unsafe-input' })]);
     });
 
-    it('refuses a file larger than 2 MiB before reading it', () => {
+    it('refuses a file above the size limit before reading it, by default 4 MiB', () => {
       const big = join(root, 'inside', 'big.xsd');
-      writeFileSync(big, ' '.repeat(2 * 1024 * 1024 + 1));
-      expect(convertFile(big).problems[0]?.message).toContain('2 MiB');
+      writeFileSync(big, ' '.repeat(4 * 1024 * 1024 + 1));
+      expect(convertFile(big).problems).toEqual([
+        expect.objectContaining({
+          code: 'resource-limit',
+          message: 'big.xsd exceeds the limit of 4194304 bytes per file',
+        }),
+      ]);
+      const small = join(root, 'inside', 'small.xsd');
+      writeFileSync(small, ' '.repeat(101));
+      expect(convertFile(small, { limits: { maxFileBytes: 100 } }).problems[0]?.code).toBe('resource-limit');
+      // An imported document above the limit leaves no partial schema either.
+      const limited = convertFile(main, { root: 'A', limits: { maxFileBytes: 300 } });
+      expect(limited.problems.map((p) => p.code)).toEqual(['resource-limit']);
+      expect(limited.schema).toBeUndefined();
     });
+  });
+
+  it('takes the size limits as options: positive integers only, the limit in effect in the message', () => {
+    const limited = capture();
+    // Above a limit, no schema is written.
+    expect(run([main, '--root', 'A', '--max-documents', '1'], limited.io)).toBe(2);
+    expect(limited.out.stdout).toBe('');
+    expect(limited.out.stderr).toContain(
+      'error resource-limit: main.xsd:2: the schema set exceeds the limit of 1 documents',
+    );
+    expect(run([main, '--root', 'A', '--max-file-bytes', '4096', '--max-total-bytes', '8192'], capture().io)).toBe(0);
+    expect(run([main, '--root', 'A', '--max-total-bytes', '-1'], capture().io)).toBe(2);
+    for (const bad of ['0', '1.5', 'x', '9007199254740992']) {
+      const { out, io } = capture();
+      expect(run([main, '--root', 'A', '--max-total-bytes', bad], io)).toBe(2);
+      expect(out.stderr).toBe('--max-total-bytes must be a positive integer\n');
+    }
   });
 
   it('exits with 2 and a message when the entry is a directory or the output cannot be written', () => {

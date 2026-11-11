@@ -97,8 +97,8 @@ export class Polymorphism {
 
   /**
    * The global elements that may appear where a particle refers to `head`: the head unless it is abstract, and the
-   * members of its substitution group, also those of members, that the head does not block. Undefined if the head
-   * has no members and isn't abstract.
+   * members of its substitution group, also those of members, whose derivation from the head's type neither the head
+   * nor that type blocks (XML Schema Part 1, 3.3.6). Undefined if the head has no members and isn't abstract.
    */
   substitutes(head: Component): Component[] | undefined {
     this.build();
@@ -113,6 +113,13 @@ export class Polymorphism {
       return out;
     }
     const headType = this.typeOf(head.node);
+    // The block of the head's complex type, or the blockDefault of its schema, applies to its derived types.
+    const headComplex = headType === undefined ? undefined : this.set.components.complexType.get(headType);
+    for (const method of headComplex ? blockedBy(headComplex.node, headComplex.doc) : []) {
+      if (method === 'extension' || method === 'restriction') {
+        blocked.add(method);
+      }
+    }
     const seen = new Set<string>([headId]);
     const visit = (id: string): void => {
       for (const member of this.members?.get(id) ?? []) {
@@ -121,7 +128,7 @@ export class Polymorphism {
           continue;
         }
         seen.add(memberId);
-        const methods = this.methodsBetween(this.typeOf(member.node), headType);
+        const methods = this.memberMethods(member.node, headType);
         if (!methods.some((method) => blocked.has(method)) && !isTrue(attr(member.node, 'abstract'))) {
           out.push(member);
         }
@@ -231,6 +238,26 @@ export class Polymorphism {
   private typeOf(node: Element): string | undefined {
     const name = this.typeName(node);
     return name && clark(name.ns, name.local);
+  }
+
+  /**
+   * The derivation methods from the type of an element declaration up to `base`. An anonymous type adds the method
+   * of its own derivation to those from its base.
+   */
+  private memberMethods(node: Element, base: string | undefined): string[] {
+    const named = this.typeOf(node);
+    if (named !== undefined) {
+      return this.methodsBetween(named, base);
+    }
+    const anonymous = xsChild(node, 'complexType') ?? xsChild(node, 'simpleType');
+    const content = anonymous && (xsChild(anonymous, 'complexContent') ?? xsChild(anonymous, 'simpleContent'));
+    const derivation = content ? xsChildren(content)[0] : anonymous && xsChild(anonymous, 'restriction');
+    const own = derivation && attr(derivation, 'base');
+    if (!derivation || own === undefined) {
+      return [];
+    }
+    const name = this.set.resolveQName(derivation, own);
+    return [derivation.localName ?? '', ...this.methodsBetween(clark(name.ns, name.local), base)];
   }
 
   /** The derivation methods on the way from `type` up to `base`; none if `type` doesn't derive from `base`. */

@@ -3,7 +3,8 @@ import type { JsonSchema, JsonType } from './json-schema.js';
 import { applyNumericFacets, type NumericFacets } from './numeric-facets.js';
 import { type At, Problems } from './problems.js';
 import { attr, type QName, type SchemaSet, XS, xsChild, xsChildren } from './schema-set.js';
-import { enumSchema, lexicalToJson, violation } from './simple-values.js';
+import { enumSchema, lexicalToJson, primaryType, violation } from './simple-values.js';
+import { equalForms, escapePattern, hasUnlistedForms } from './value-forms.js';
 import { combinePatterns, translateBody, XsdRegexError } from './xsd-regex.js';
 
 export { lexicalToJson } from './simple-values.js';
@@ -77,6 +78,57 @@ const INTEGERS: Record<string, { minimum?: number; maximum?: number }> = {
 const STRINGS = ['string', 'normalizedString', 'token', 'anyURI', 'NOTATION'];
 /** The built-in types whose pattern consists of XML name characters. */
 const NAME_TYPES = ['Name', 'NCName', 'ID', 'IDREF', 'ENTITY', 'NMTOKEN', 'QName'];
+/** The values of xs:float and xs:double that JSON numbers can't hold, written as strings. */
+const SPECIAL_VALUES = ['INF', '-INF', 'NaN'];
+
+/**
+ * Which of INF, -INF and NaN, and whether numbers, the bounds of an xs:float or xs:double allow (XML Schema Part 2,
+ * 3.2.4, 3.2.5): an inclusive NaN bound allows exactly NaN, an exclusive one nothing, and every other bound rules NaN
+ * out; a finite minimum rules out -INF, a finite maximum INF; a bound of INF or -INF limits the numbers.
+ */
+class SpecialValues {
+  numbers = true;
+  private values = new Set(SPECIAL_VALUES);
+
+  get allowed(): string[] {
+    return SPECIAL_VALUES.filter((value) => this.values.has(value));
+  }
+
+  /** Takes a bound into account; true if its value is INF, -INF or NaN and needs no numeric keyword. */
+  bound(value: string, lower: boolean, exclusive: boolean): boolean {
+    const keep = (...values: string[]) => {
+      this.values = new Set([...this.values].filter((v) => values.includes(v)));
+    };
+    if (value === 'NaN') {
+      this.numbers = false;
+      keep(...(exclusive ? [] : ['NaN']));
+      return true;
+    }
+    this.values.delete('NaN');
+    const far = lower ? '-INF' : 'INF';
+    const near = lower ? 'INF' : '-INF';
+    if (value === far) {
+      if (exclusive) {
+        this.values.delete(far);
+      }
+      return true;
+    }
+    if (value === near) {
+      // min INF or max -INF: only that value, if inclusive; nothing else.
+      this.numbers = false;
+      keep(...(exclusive ? [] : [near]));
+      return true;
+    }
+    this.values.delete(far);
+    return false;
+  }
+
+  /** Keeps the values the patterns of the type accept. */
+  match(pattern: RegExp): void {
+    this.values = new Set([...this.values].filter((value) => pattern.test(value)));
+  }
+}
+
 /** The built-in list types and their item types; they need at least one item. */
 const LIST_ITEMS: Record<string, string> = { NMTOKENS: 'NMTOKEN', IDREFS: 'IDREF', ENTITIES: 'ENTITY' };
 const LISTS = Object.keys(LIST_ITEMS);
@@ -152,7 +204,7 @@ export function normalizeWhiteSpace(text: string, whiteSpace: WhiteSpace | undef
   return whiteSpace === 'collapse' ? replaced.replace(/ {2,}/g, ' ').trim() : replaced;
 }
 
-/** The JSON type a built-in XML Schema type maps to; undefined for anySimpleType and anyType. */
+/** The JSON type a built-in XML Schema type maps to: anySimpleType is text; undefined for anyType. */
 export function jsonTypeOf(builtin: string): JsonType | undefined {
   if (builtin === 'boolean') {
     return 'boolean';
@@ -163,7 +215,7 @@ export function jsonTypeOf(builtin: string): JsonType | undefined {
   if (builtin === 'decimal' || builtin === 'float' || builtin === 'double') {
     return 'number';
   }
-  if (builtin === 'anySimpleType' || builtin === 'anyType') {
+  if (builtin === 'anyType') {
     return undefined;
   }
   return 'string';
@@ -226,6 +278,8 @@ export class SimpleTypes {
   private readonly openUnions = new Set<Element>();
   /** the same types with patterns for dates and times, to pick the member of a union that takes a value */
   private patternTypes: SimpleTypes | undefined;
+  /** whether the schema has been reported to use xs:ID or xs:IDREF */
+  private idReported = false;
 
   /**
    * @param nameRef - a `$ref` to one definition of a built-in name type (`Name`, `NCName`, `QName` and those derived
@@ -330,7 +384,7 @@ export class SimpleTypes {
   }
 
   /** The JSON type of a simple type, used to convert fixed and default values. */
-  jsonType(type: SimpleTypeRef, from?: Element): JsonType | undefined {
+  jsonType(type: SimpleTypeRef, from?: Element): JsonType | JsonType[] | undefined {
     const derivation = this.derive(type, from);
     if (derivation.union) {
       const { node, members } = derivation.union;
@@ -338,9 +392,9 @@ export class SimpleTypes {
         return 'string';
       }
       this.openUnions.add(node);
-      const json = sharedJsonType(members.map((member) => this.jsonType(member, node)));
+      const types = members.map((member) => this.jsonType(member, node));
       this.openUnions.delete(node);
-      return json ?? 'string';
+      return withSpecials(sharedJsonType(types), types) ?? 'string';
     }
     if (derivation.variety === 'list') {
       return 'array';
@@ -348,6 +402,9 @@ export class SimpleTypes {
     const integerOnly = derivation.steps.some((step) =>
       step.facets.some((f) => f.localName === 'fractionDigits' && Number(attr(f, 'value')) === 0),
     );
+    if (derivation.builtin === 'float' || derivation.builtin === 'double') {
+      return ['number', 'string'];
+    }
     const json = jsonTypeOf(derivation.builtin);
     return json === 'number' && integerOnly ? 'integer' : json;
   }
@@ -458,6 +515,9 @@ export class SimpleTypes {
     let enumeration: string[] | undefined;
     let enumAt: Element | undefined;
     const numeric: NumericFacets = { lower: [], upper: [] };
+    // xs:float and xs:double also have the values INF, -INF and NaN, which bounds can rule out or name.
+    const floating = derivation.builtin === 'float' || derivation.builtin === 'double';
+    const specials = new SpecialValues();
     // Enumeration values are values of the base type of their step, normalized with its whiteSpace.
     let baseWhiteSpace = builtinWhiteSpace(derivation.builtin);
     for (const step of derivation.steps) {
@@ -521,7 +581,12 @@ export class SimpleTypes {
               );
               break;
             }
-            const bound = lexicalToJson('number', value);
+            const lower = facet.localName.startsWith('min');
+            const exclusive = facet.localName.endsWith('Exclusive');
+            if (floating && specials.bound(value.trim(), lower, exclusive)) {
+              break;
+            }
+            const bound = lexicalToJson(floating ? ['number', 'string'] : 'number', value);
             if ('error' in bound) {
               this.problems.error('invalid-facet', bound.error, facetAt);
               break;
@@ -533,8 +598,7 @@ export class SimpleTypes {
                 facetAt,
               );
             }
-            const exclusive = facet.localName.endsWith('Exclusive');
-            (facet.localName.startsWith('min') ? numeric.lower : numeric.upper).push({
+            (lower ? numeric.lower : numeric.upper).push({
               value: bound.value as number,
               exclusive,
             });
@@ -581,6 +645,10 @@ export class SimpleTypes {
       }
     }
 
+    this.checkPrecision(derivation.builtin, numeric, enumeration !== undefined, at);
+    if (derivation.builtin === 'ID' || derivation.builtin === 'IDREF') {
+      this.idUsed(at);
+    }
     applyNumericFacets(schema, numeric, this.problems, at);
     if (schema.maxLength === Infinity) {
       delete schema.maxLength;
@@ -597,6 +665,9 @@ export class SimpleTypes {
       );
       return this.nameSchema(ref, schema, patternSteps);
     }
+    if (floating && patternSteps.length > 0) {
+      specials.match(new RegExp(combinePatterns(patternSteps), 'u'));
+    }
     if (patternSteps.length > 0) {
       if (json === 'string') {
         schema.pattern = combinePatterns(patternSteps);
@@ -610,10 +681,180 @@ export class SimpleTypes {
       }
     }
 
+    if (floating) {
+      return this.floatingSchema(schema, specials, enumeration, enumAt);
+    }
     if (enumeration !== undefined && enumAt !== undefined) {
-      return enumSchema(schema, enumeration, this.problems, this.at(enumAt));
+      const out = enumSchema(schema, enumeration, this.problems, this.at(enumAt));
+      return json === 'string' ? this.byValue(out, (lexical) => this.valueOf(type, lexical, from)).schema : out;
     }
     return schema;
+  }
+
+  /**
+   * An xs:float or xs:double: a JSON number, or one of the strings INF, -INF and NaN that the facets allow. With both,
+   * it is an `anyOf` of the number schema and an `enum` of the strings; with an enumeration, one `enum` of numbers and
+   * strings. Without any value, the schema accepts nothing.
+   */
+  private floatingSchema(
+    numbers: JsonSchema,
+    specials: SpecialValues,
+    enumeration: string[] | undefined,
+    enumAt: Element | undefined,
+  ): JsonSchema {
+    let numeric: JsonSchema | undefined = specials.numbers ? numbers : undefined;
+    let allowed = specials.allowed;
+    if (enumeration !== undefined) {
+      const named = enumeration.map((lexical) => lexical.trim());
+      allowed = allowed.filter((value) => named.includes(value));
+      for (const value of named.filter((v) => SPECIAL_VALUES.includes(v) && !allowed.includes(v))) {
+        this.problems.warning(
+          'unreachable-enumeration',
+          `enumeration value ${value} is left out: another facet rules it out`,
+          this.at(enumAt),
+        );
+      }
+      const finite = enumeration.filter((lexical) => !SPECIAL_VALUES.includes(lexical.trim()));
+      numeric =
+        numeric && finite.length > 0
+          ? enumSchema(numbers, finite, this.problems, this.at(enumAt), ['number', 'string'])
+          : undefined;
+      if (numeric?.not) {
+        numeric = undefined;
+      }
+      if (numeric && allowed.length > 0) {
+        return { enum: [...(numeric.enum ?? []), ...allowed] };
+      }
+    }
+    if (numeric && allowed.length > 0) {
+      return { anyOf: [numeric, { enum: allowed }] };
+    }
+    if (numeric) {
+      return numeric;
+    }
+    return allowed.length > 0 ? { type: 'string', enum: allowed } : { not: {} };
+  }
+
+  /**
+   * An enumeration of string values compared by value: a pattern with all spellings of the values, where a value has
+   * more than one. Unchanged where each value has one spelling, or where the spellings can't be listed (a float or
+   * double member of a union); `unlisted` then names the type.
+   */
+  private byValue(
+    schema: JsonSchema,
+    valueOf: (lexical: string) => { builtin: string; text: string },
+  ): { schema: JsonSchema; unlisted?: string } {
+    if (!schema.enum) {
+      return { schema };
+    }
+    const forms = this.valueForms(schema.enum.map(String), valueOf);
+    if ('unlisted' in forms) {
+      return { schema, unlisted: forms.unlisted };
+    }
+    if (forms.pattern === undefined) {
+      return { schema };
+    }
+    const out: JsonSchema = { ...schema, pattern: forms.pattern };
+    delete out.enum;
+    return { schema: out };
+  }
+
+  /** The pattern of all spellings of these values, see `byValue`; undefined if each value has one spelling. */
+  private valueForms(
+    lexicals: string[],
+    valueOf: (lexical: string) => { builtin: string; text: string },
+  ): { pattern?: string } | { unlisted: string } {
+    let needed = false;
+    const forms: string[] = [];
+    for (const lexical of lexicals) {
+      const { builtin, text } = valueOf(lexical);
+      if (hasUnlistedForms(builtin)) {
+        return { unlisted: `xs:${builtin}` };
+      }
+      const own = equalForms(builtin, text);
+      needed ||= own !== undefined;
+      forms.push(own ?? escapePattern(text));
+    }
+    return needed ? { pattern: `^(?:${forms.join('|')})$` } : {};
+  }
+
+  /**
+   * The pattern for a fixed value of a type whose JSON value is a string, compared by value as for `byValue`;
+   * undefined if the value has one spelling, `unlisted` if its spellings can't be listed.
+   */
+  fixedForms(type: SimpleTypeRef, lexical: string, from?: Element): { pattern?: string } | { unlisted: string } {
+    if (this.jsonType(type, from) !== 'string') {
+      return {};
+    }
+    return this.valueForms([lexical], (value) => this.valueOf(type, value, from));
+  }
+
+  /**
+   * The built-in type that compares a value and the value as it normalizes it: for a union, those of the member
+   * that accepts the value first.
+   */
+  private valueOf(type: SimpleTypeRef, lexical: string, from?: Element, depth = 0): { builtin: string; text: string } {
+    const derivation = this.derive(type, from);
+    if (derivation.union && depth < 20) {
+      return this.unionValueOf(derivation.union, lexical, depth);
+    }
+    return { builtin: derivation.builtin, text: normalizeWhiteSpace(lexical, this.whiteSpace(type, from)) };
+  }
+
+  private unionValueOf(
+    union: NonNullable<Derivation['union']>,
+    lexical: string,
+    depth = 0,
+  ): { builtin: string; text: string } {
+    const member = union.members[Math.max(0, this.memberIndex(union, lexical))];
+    return member ? this.valueOf(member, lexical, union.node, depth + 1) : { builtin: 'string', text: lexical };
+  }
+
+  /**
+   * Reports what JSON numbers can't check of a decimal type: the range of xs:long and xs:unsignedLong beyond 2^53,
+   * and fractionDigits where values may have more than 15 significant digits, which a JSON number rounds away.
+   */
+  private checkPrecision(builtin: string, numeric: NumericFacets, enumerated: boolean, at: At | undefined): void {
+    const safe = 2 ** 53;
+    const lower = numeric.lower.some((b) => b.value >= -safe);
+    const upper = numeric.upper.some((b) => b.value <= safe);
+    if (!enumerated && ((builtin === 'long' && !(lower && upper)) || (builtin === 'unsignedLong' && !upper))) {
+      this.problems.warning(
+        'unsupported-bound',
+        `the range of xs:${builtin} reaches beyond 2^53, which JSON numbers can't hold exactly; it isn't checked`,
+        at,
+      );
+    }
+    // How many digits a value can have before the point: from totalDigits, else from bounds on both sides.
+    const fraction = numeric.fractionDigits;
+    const extent = Math.max(...[...numeric.lower, ...numeric.upper].map((b) => Math.abs(b.value)));
+    const bounded = numeric.lower.length > 0 && numeric.upper.length > 0 && Number.isFinite(extent);
+    const whole =
+      numeric.totalDigits !== undefined
+        ? Math.max(0, numeric.totalDigits - (fraction ?? 0))
+        : bounded
+          ? String(Math.trunc(extent)).length
+          : Infinity;
+    if (!enumerated && fraction !== undefined && whole + fraction > 15) {
+      this.problems.warning(
+        'rounded-number',
+        `fractionDigits ${numeric.fractionDigits} is checked on JSON numbers, which keep 15 significant digits; ` +
+          'a value with more digits is rounded before the check',
+        at,
+      );
+    }
+  }
+
+  /** Reports once per schema that IDs and references to them aren't checked. */
+  private idUsed(at: At | undefined): void {
+    if (!this.idReported) {
+      this.idReported = true;
+      this.problems.warning(
+        'unchecked-id',
+        "xs:ID and xs:IDREF values are checked as names; that IDs are unique and references point to one isn't checked",
+        at,
+      );
+    }
   }
 
   /** A name type: the `$ref` to the definition of its built-in type, then its own facets and patterns. */
@@ -638,14 +879,17 @@ export class SimpleTypes {
     }
     this.openUnions.add(union.node);
     let members = union.members.map((member) => this.schema(member, union.node));
-    const json = sharedJsonType(members.map((m) => m.type));
+    const memberTypes = union.members.map((member) => this.jsonType(member, union.node));
+    const json = sharedJsonType(memberTypes);
+    // A float or double member adds INF, -INF and NaN: the union then has no single JSON type.
+    const specialValues = Array.isArray(withSpecials(json, memberTypes));
     const withList = union.members.some((member) => this.containsList(member, union.node));
     const unchecked: string[] = [];
     if (json === undefined && !withList) {
       members = union.members.map((member) => this.textForm(member, union.node, unchecked));
     }
     this.openUnions.delete(union.node);
-    const schema: JsonSchema = { type: withList ? 'string' : (json ?? 'string') };
+    const schema: JsonSchema = specialValues && !withList ? {} : { type: withList ? 'string' : (json ?? 'string') };
     // A member without facets of that very type accepts every value, and so does the union then.
     const acceptsAll = (m: JsonSchema) =>
       (m.type ?? 'string') === schema.type &&
@@ -653,21 +897,10 @@ export class SimpleTypes {
     // Members that normalize differently need their branches even then: a reader picks the member by them.
     const whiteSpaces = new Set(union.members.map((member) => this.whiteSpace(member, union.node)));
     const branchesNeeded = this.options.xml !== false && schema.type === 'string' && whiteSpaces.size > 1;
-    const hasEnumeration = derivation.steps.some((step) => step.facets.some((f) => f.localName === 'enumeration'));
     if (withList) {
       this.problems.warning(
         'unsupported-union',
         'xs:union with a list member: the value is a string and is checked as a string only',
-        at,
-      );
-    } else if (json === undefined && (unchecked.length > 0 || hasEnumeration)) {
-      const parts = [...new Set(unchecked)];
-      if (hasEnumeration) {
-        parts.push('the enumeration of the union, which compares the text instead of the values');
-      }
-      this.problems.warning(
-        'unsupported-union',
-        `xs:union whose members have different JSON types is checked as text; not checked: ${parts.join(', ')}`,
         at,
       );
     }
@@ -717,12 +950,29 @@ export class SimpleTypes {
         at,
       );
     }
-    if (!enumeration) {
-      return schema;
+    let out = schema;
+    let unlisted: string | undefined;
+    if (enumeration) {
+      // The enumeration lists values; the branches stay, so that a reader still knows how each member normalizes.
+      const types = specialValues ? withSpecials(json, memberTypes) : schema.type;
+      out = enumSchema(schema, enumeration.values, this.problems, this.at(enumeration.at), types);
+      if (schema.type === 'string') {
+        ({ schema: out, unlisted } = this.byValue(out, (lexical) => this.unionValueOf(union, lexical)));
+      }
+      out = branchesNeeded && schema.anyOf ? { ...out, anyOf: schema.anyOf } : out;
     }
-    // The enumeration lists values; the branches stay, so that a reader still knows how each member normalizes.
-    const out = enumSchema(schema, enumeration.values, this.problems, this.at(enumeration.at));
-    return branchesNeeded && schema.anyOf ? { ...out, anyOf: schema.anyOf } : out;
+    if (!withList && json === undefined && (unchecked.length > 0 || unlisted !== undefined)) {
+      const parts = [...new Set(unchecked)];
+      if (unlisted !== undefined) {
+        parts.push(`the enumeration of the union, which compares ${unlisted} values as text`);
+      }
+      this.problems.warning(
+        'unsupported-union',
+        `xs:union whose members have different JSON types is checked as text; not checked: ${parts.join(', ')}`,
+        at,
+      );
+    }
+    return out;
   }
 
   /**
@@ -907,7 +1157,7 @@ export class SimpleTypes {
    */
   private textForm(member: SimpleTypeRef, from: Element, unchecked: string[]): JsonSchema {
     const schema = this.schema(member, from);
-    if ((schema.type ?? 'string') === 'string') {
+    if ((schema.type ?? 'string') === 'string' && this.jsonType(member, from) === 'string') {
       return schema;
     }
     const derivation = this.derive(member, from);
@@ -964,6 +1214,13 @@ export class SimpleTypes {
    * is not checked here.
    */
   private memberText(union: NonNullable<Derivation['union']>, lexical: string): string {
+    const index = this.memberIndex(union, lexical);
+    const member = union.members[index < 0 ? 0 : index];
+    return member ? normalizeWhiteSpace(lexical, this.whiteSpace(member, union.node)) : lexical;
+  }
+
+  /** The index of the member of a union that accepts a lexical value first; -1 if none does. */
+  private memberIndex(union: NonNullable<Derivation['union']>, lexical: string): number {
     const types = this.checker();
     const { node, members } = union;
     const opened = !types.openUnions.has(node);
@@ -973,8 +1230,7 @@ export class SimpleTypes {
       types.openUnions.delete(node);
     }
     const normalized = members.map((member) => normalizeWhiteSpace(lexical, this.whiteSpace(member, node)));
-    const index = schemas.findIndex((schema, i) => violation(schema, normalized[i]) === undefined);
-    return normalized[index < 0 ? 0 : index] ?? lexical;
+    return schemas.findIndex((schema, i) => violation(schema, normalized[i]) === undefined);
   }
 
   /**
@@ -993,7 +1249,7 @@ export class SimpleTypes {
   private withinBase(
     values: string[],
     base: string[] | undefined,
-    json: JsonType | undefined,
+    json: JsonType | JsonType[] | undefined,
     node: Element,
   ): string[] {
     if (base === undefined) {
@@ -1018,6 +1274,15 @@ export class SimpleTypes {
   }
 }
 
+/** The shared number type of a union, with the strings INF, -INF and NaN if a float or double member has them. */
+function withSpecials(
+  json: JsonType | undefined,
+  types: (JsonType | JsonType[] | undefined)[],
+): JsonType | JsonType[] | undefined {
+  const special = types.some((type) => Array.isArray(type) && type.includes('string'));
+  return special && (json === 'number' || json === 'integer') ? ['number', 'string'] : json;
+}
+
 /** Why the items of an array value break the item schema, if they do. */
 function itemViolation(items: JsonSchema, value: unknown[]): string | undefined {
   for (const item of value) {
@@ -1030,8 +1295,8 @@ function itemViolation(items: JsonSchema, value: unknown[]): string | undefined 
 }
 
 /** The JSON type all members of a union share, with integer and number counted as number; undefined if they differ. */
-function sharedJsonType(types: (JsonType | undefined)[]): JsonType | undefined {
-  const distinct = new Set(types.map((type) => type ?? 'string'));
+function sharedJsonType(types: (JsonType | JsonType[] | undefined)[]): JsonType | undefined {
+  const distinct = new Set(types.map((type) => (Array.isArray(type) ? primaryType(type) : type) ?? 'string'));
   if (distinct.size === 1) {
     return [...distinct][0];
   }

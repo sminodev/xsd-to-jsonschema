@@ -1,3 +1,3 @@
-<R xmlns="urn:v:any" xmlns:f="urn:foreign"><Head>k</Head><Ext f:a="1"><f:x>one</f:x><f:y f:b="2">two</f:y><f:z>
+<R xmlns="urn:v:any" xmlns:f="urn:foreign"><Head>k</Head><Ext f:a="1" f:value="w"><f:x>one</f:x><f:y f:b="2">two</f:y><f:z>
     <f:w>deep</f:w>
-  </f:z><f:x> more </f:x><f:m>before<f:b>bold</f:b>after</f:m><f:empty/></Ext></R>
+  </f:z><f:x> more </f:x><f:m>before<f:b>bold</f:b>after</f:m><f:empty/><f:value>v</f:value></Ext></R>

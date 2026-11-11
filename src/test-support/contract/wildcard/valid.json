@@ -2,10 +2,22 @@
   "Head": "k",
   "Ext": {
     "a": "1",
-    "x": ["one", " more "],
-    "y": { "b": "2", "value": "two" },
-    "z": { "w": "deep" },
-    "m": { "value": "before<f:b xmlns:f=\"urn:foreign\">bold</f:b>after" },
-    "empty": ""
+    "x": [
+      "one",
+      " more "
+    ],
+    "y": {
+      "b": "2",
+      "value": "two"
+    },
+    "z": {
+      "w": "deep"
+    },
+    "m": {
+      "value": "before<f:b xmlns:f=\"urn:foreign\">bold</f:b>after"
+    },
+    "empty": "",
+    "@value": "w",
+    "{urn:foreign}value": "v"
   }
 }

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- INF, -INF and NaN as strings in an element, an attribute, a repeated element and a list; bound facets as in XSD 1.0. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:simpleType name="DoubleList"><xs:list itemType="xs:double"/></xs:simpleType>
+  <xs:simpleType name="NonNegative"><xs:restriction base="xs:double"><xs:minInclusive value="0"/></xs:restriction></xs:simpleType>
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="d" type="xs:double"/>
+        <xs:element name="f" type="xs:float" maxOccurs="3"/>
+        <xs:element name="l" type="DoubleList"/>
+        <xs:element name="b" type="NonNegative"/>
+      </xs:sequence>
+      <xs:attribute name="att" type="xs:double"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

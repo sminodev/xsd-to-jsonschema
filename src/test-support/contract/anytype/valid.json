@@ -1,0 +1,5 @@
+{
+  "free": { "a": "1", "x": "one", "y": "two" },
+  "empty": "",
+  "typed": { "#type": "{}K", "Name": "n" }
+}

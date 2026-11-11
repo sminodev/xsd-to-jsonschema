@@ -610,7 +610,8 @@ describe('convert: XML Schema and JSON Schema agree', () => {
         wrongInline: [instance('<Fee>10.00</Fee><Mode>AUTO</Mode><Inline>8</Inline>'), false],
       },
     );
-    expect(child.problems).toEqual([]);
+    // Mode has no type: xs:anyType, written without a schema.
+    expect(child.problems.map((p) => p.code)).toEqual(['unsupported-any']);
     const root = await check(
       { 'root.xsd': schema(`<xs:element name="Root" type="Price" fixed="10.00"/>${price}`) },
       {
@@ -1154,7 +1155,9 @@ describe('convert: XML Schema and JSON Schema agree', () => {
         message: expect.stringContaining('the range of xs:byte') as string,
       },
     ]);
-    expect(def(out, 'DecimalOrDouble').type).toBe('number');
+    // A double member adds INF, -INF and NaN: the union has no single JSON type, the members decide.
+    expect(def(out, 'DecimalOrDouble')).not.toHaveProperty('type');
+    expect(def(out, 'DecimalOrDouble').anyOf).toHaveLength(2);
     expect(def(out, 'CountOrNone').anyOf).toHaveLength(2);
   });
 
@@ -1753,7 +1756,10 @@ describe('convert: XML Schema and JSON Schema agree', () => {
     expect(value('simpleContent')).toEqual({ B: { unit: 'EUR', value: null } });
     expect(value('simpleContentNoAttributes')).toEqual({ B: null });
     expect(value('repeated')).toEqual({ L: [1, null, 3] });
-    expect(value('nilWithContent')).toEqual({ error: 'D is nil and has content' });
+    expect(value('nilWithContent')).toEqual({
+      error: '/Root/D: the element is nil and has content',
+      code: 'nil-content',
+    });
   });
 
   it('on wildcard content: written without a schema, and #unknown outside wildcards', async () => {
@@ -1810,9 +1816,9 @@ describe('convert: XML Schema and JSON Schema agree', () => {
       },
     });
     expect(collisions.map((v) => [v.xsd, v.value])).toEqual([
-      [true, { error: 'element f:x has no JSON form: x is already a property of the object' }],
-      [true, { error: 'element g:x has no JSON form: x comes from two namespaces' }],
-      [true, { error: 'element Required has no JSON form: Required is already a property of the object' }],
+      [true, { error: '/Root/Ext/f:x: x is already a property of the object', code: 'name-collision' }],
+      [true, { error: '/Root/Ext/g:x: x comes from two namespaces', code: 'name-collision' }],
+      [true, { error: '/Root/Open/Required: Required is already a property of the object', code: 'name-collision' }],
     ]);
   });
 
@@ -1957,9 +1963,9 @@ describe('convert: XML Schema and JSON Schema agree', () => {
       },
     });
     expect(errors.map((v) => [v.xsd, v.value])).toEqual([
-      [true, { error: 'N: xsi:type xs:integer has no JSON form here' }],
-      [true, { error: 'C: xsi:type Short has no JSON form here' }],
-      [false, { error: 'L: xsi:type xs:token has no JSON form here' }],
+      [true, { error: '/Root/N: xsi:type xs:integer on an element of a simple type', code: 'xsi-type-simple' }],
+      [true, { error: '/Root/C: xsi:type Short on an element of a simple type', code: 'xsi-type-simple' }],
+      [false, { error: '/Root/L: xsi:type xs:token on an element of a simple type', code: 'xsi-type-simple' }],
     ]);
   });
 
@@ -2022,5 +2028,341 @@ describe('convert: XML Schema and JSON Schema agree', () => {
       def(out, 'NMTOKEN').pattern,
       def(out, 'ID').pattern,
     ]);
+  });
+
+  it('on empty elements: they take the fixed or default value, but not with white space in them', async () => {
+    const files = {
+      'empty.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="D" type="xs:integer" default="5" minOccurs="0"/>
+				<xs:element name="F" type="xs:string" fixed="abc" minOccurs="0"/>
+				<xs:element name="B" type="xs:boolean" fixed="true" minOccurs="0"/>
+				<xs:element name="U" default="x" minOccurs="0"/>
+				<xs:element name="P" minOccurs="0" default="2.5">
+					<xs:complexType>
+						<xs:simpleContent>
+							<xs:extension base="xs:decimal"><xs:attribute name="unit" type="xs:string"/></xs:extension>
+						</xs:simpleContent>
+					</xs:complexType>
+				</xs:element>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    await check(files, {
+      empty: [instance('<D/><F></F><B/><U/><P unit="m"/>'), true],
+      written: [instance('<D>7</D><F>abc</F><B>true</B><P>3</P>'), true],
+      space: [instance('<D> </D>'), false],
+      wrongFixed: [instance('<F>abd</F>'), false],
+      emptyWithComment: [instance('<D><!-- none --></D>'), true],
+    });
+  });
+
+  it('on repeated groups that need more occurrences than a greedy reading gives', async () => {
+    const files = {
+      'groups.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:choice>
+				<xs:sequence minOccurs="2" maxOccurs="2">
+					<xs:element name="A" type="xs:string" maxOccurs="2"/>
+				</xs:sequence>
+				<xs:sequence minOccurs="2" maxOccurs="2">
+					<xs:element name="C" type="xs:string" maxOccurs="2"/>
+					<xs:element name="D" type="xs:string" minOccurs="0"/>
+				</xs:sequence>
+				<xs:choice minOccurs="0" maxOccurs="unbounded">
+					<xs:element name="E" type="xs:string" minOccurs="3" maxOccurs="5"/>
+					<xs:element name="F" type="xs:string" minOccurs="3" maxOccurs="5"/>
+				</xs:choice>
+			</xs:choice>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    await check(files, {
+      twoA: [instance('<A/><A/>'), true],
+      fourA: [instance('<A/><A/><A/><A/>'), true],
+      oneA: [instance('<A/>'), false],
+      fiveA: [instance('<A/><A/><A/><A/><A/>'), false],
+      splitBeforeD: [instance('<C/><C/><D/>'), true],
+      sixE: [instance('<E/><E/><E/><E/><E/><E/>'), true],
+      twoE: [instance('<E/><E/>'), false],
+    });
+  });
+
+  it('on xsi:nil: any value of it needs a nillable element, and it has to be a boolean', async () => {
+    const files = {
+      'nil.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="S" type="xs:string" minOccurs="0"/>
+				<xs:element name="N" type="xs:string" nillable="true" minOccurs="0"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const xsi = 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"';
+    await check(files, {
+      nilFalseNotNillable: [instance(`<S ${xsi} xsi:nil="false">x</S>`), false],
+      nilFalseNillable: [instance(`<N ${xsi} xsi:nil="false">x</N>`), true],
+      nilTrueNillable: [instance(`<N ${xsi} xsi:nil="1"/>`), true],
+      nilNoBoolean: [instance(`<N ${xsi} xsi:nil="yes">x</N>`), false],
+    });
+  });
+
+  it('on the lexical forms of numbers: no exponent for decimals, digits only for integers', async () => {
+    const files = {
+      'numbers.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="Dec" type="xs:decimal" minOccurs="0"/>
+				<xs:element name="Int" type="xs:integer" minOccurs="0"/>
+				<xs:element name="Small" type="xs:int" nillable="true" minOccurs="0"/>
+				<xs:element name="Dbl" type="xs:double" minOccurs="0"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    await check(files, {
+      plain: [instance('<Dec>+1.50</Dec><Int>-007</Int><Small>12</Small><Dbl>1E4</Dbl>'), true],
+      decimalExponent: [instance('<Dec>-1E4</Dec>'), false],
+      decimalFractionOnly: [instance('<Dec>.5</Dec>'), true],
+      integerFraction: [instance('<Int>+0.0</Int>'), false],
+      integerExponent: [instance('<Int>1e2</Int>'), false],
+      nillableExponent: [instance('<Small>1e2</Small>'), false],
+    });
+  });
+
+  it('on mixed="1", a prohibited attribute in an attribute group and xs:anySimpleType', async () => {
+    const files = {
+      'misc.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="M" minOccurs="0"><xs:complexType mixed="1"/></xs:element>
+				<xs:element name="R" type="Derived" minOccurs="0"/>
+				<xs:element name="S" type="xs:anySimpleType" minOccurs="0"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	<xs:element name="X"/>
+	<xs:complexType name="Base"><xs:attribute name="a"/></xs:complexType>
+	<xs:complexType name="Derived">
+		<xs:complexContent><xs:restriction base="Base"><xs:attributeGroup ref="Group"/></xs:restriction></xs:complexContent>
+	</xs:complexType>
+	<xs:attributeGroup name="Group"><xs:attribute name="a" use="prohibited"/></xs:attributeGroup>`),
+    };
+    const { schema: out } = await check(files, {
+      mixedText: [instance('<M>text</M>'), true],
+      kept: [instance('<R a="x"/>'), true],
+      other: [instance('<R b="x"/>'), false],
+      simpleText: [instance('<S> any text </S>'), true],
+      simpleChild: [instance('<S><X/></S>'), false],
+    });
+    expect(prop(out, 'S')).toMatchObject({ type: 'string' });
+  });
+
+  it('on value equality: time zones, fractional seconds, hexBinary case and numbers in unions', async () => {
+    const files = {
+      'values.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="T" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType>
+						<xs:restriction base="xs:dateTime">
+							<xs:enumeration value="2002-01-01T12:00:00-00:00"/>
+							<xs:enumeration value="2002-01-01T13:00:00.50+01:00"/>
+						</xs:restriction>
+					</xs:simpleType>
+				</xs:element>
+				<xs:element name="Day" type="xs:date" fixed="2002-01-01Z" minOccurs="0"/>
+				<xs:element name="H" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType><xs:restriction base="xs:hexBinary"><xs:enumeration value="0aFF"/></xs:restriction></xs:simpleType>
+				</xs:element>
+				<xs:element name="U" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType>
+						<xs:restriction>
+							<xs:simpleType><xs:union memberTypes="xs:boolean xs:int xs:NCName"/></xs:simpleType>
+							<xs:enumeration value="1"/>
+							<xs:enumeration value="007"/>
+							<xs:enumeration value="abc"/>
+						</xs:restriction>
+					</xs:simpleType>
+				</xs:element>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const { schema: out } = await check(files, {
+      utc: [
+        instance('<T>2002-01-01T12:00:00Z</T><T>2002-01-01T12:00:00+00:00</T><T>2002-01-01T12:00:00.000-00:00</T>'),
+        true,
+      ],
+      fraction: [instance('<T>2002-01-01T13:00:00.5+01:00</T><T>2002-01-01T13:00:00.500+01:00</T>'), true],
+      otherTime: [instance('<T>2002-01-01T12:00:01Z</T>'), false],
+      noZone: [instance('<T>2002-01-01T12:00:00</T>'), false],
+      day: [instance('<Day>2002-01-01Z</Day>'), true],
+      dayEmpty: [instance('<Day/>'), true],
+      otherDay: [instance('<Day>2002-01-02Z</Day>'), false],
+      hex: [instance('<H>0AFF</H><H>0aff</H>'), true],
+      otherHex: [instance('<H>0AFE</H>'), false],
+      union: [instance('<U>true</U><U>7</U><U>+0007</U><U>abc</U>'), true],
+      unionOther: [instance('<U>8</U>'), false],
+      unionFalse: [instance('<U>false</U>'), false],
+    });
+    expect(prop(out, 'Day')).toMatchObject({ default: '2002-01-01Z' });
+    expect(prop(out, 'Day')).not.toHaveProperty('const');
+  });
+
+  it('on block of a substitution group head type and on members of an anonymous type', async () => {
+    const files = {
+      'block.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element ref="Head" minOccurs="0" maxOccurs="unbounded"/>
+				<xs:element ref="Second" minOccurs="0" maxOccurs="unbounded"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	<xs:element name="Head" type="HeadType" block="extension"/>
+	<xs:complexType name="HeadType"><xs:sequence><xs:element name="A" type="xs:string"/></xs:sequence></xs:complexType>
+	<xs:element name="Member" substitutionGroup="Head">
+		<xs:complexType>
+			<xs:complexContent>
+				<xs:extension base="HeadType"><xs:sequence><xs:element name="B" type="xs:string"/></xs:sequence></xs:extension>
+			</xs:complexContent>
+		</xs:complexType>
+	</xs:element>
+	<xs:element name="Second" type="Blocking"/>
+	<xs:complexType name="Blocking" block="restriction"><xs:sequence><xs:element name="A" type="xs:string" minOccurs="0"/></xs:sequence></xs:complexType>
+	<xs:complexType name="Narrow"><xs:complexContent><xs:restriction base="Blocking"/></xs:complexContent></xs:complexType>
+	<xs:element name="SecondMember" type="Narrow" substitutionGroup="Second"/>`),
+    };
+    await check(files, {
+      heads: [instance('<Head><A/></Head><Second/>'), true],
+      anonymousExtension: [instance('<Member><A/><B/></Member>'), false],
+      typeBlocksRestriction: [instance('<SecondMember/>'), false],
+    });
+  });
+
+  it('on choices without possible particles and on wildcards in repeated groups', async () => {
+    const files = {
+      'choice.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:choice minOccurs="0" maxOccurs="unbounded">
+					<xs:element name="A" type="xs:string"/>
+					<xs:choice><xs:element name="None" type="xs:string" minOccurs="0" maxOccurs="0"/></xs:choice>
+				</xs:choice>
+				<xs:element name="W" minOccurs="0">
+					<xs:complexType>
+						<xs:choice maxOccurs="unbounded"><xs:any namespace="##any" processContents="skip"/></xs:choice>
+					</xs:complexType>
+				</xs:element>
+				<xs:element name="Bounded" minOccurs="0">
+					<xs:complexType>
+						<xs:sequence maxOccurs="2">
+							<xs:element name="A" type="xs:string" minOccurs="0"/>
+							<xs:any namespace="##other" processContents="skip" minOccurs="0" maxOccurs="unbounded"/>
+						</xs:sequence>
+					</xs:complexType>
+				</xs:element>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const { verdicts } = await check(files, {
+      choice: [instance('<A/><A/>'), true],
+      wildcard: [instance('<W><e1><a1>x</a1></e1><e2/></W>'), true],
+      manyInFewOccurrences: [
+        instance('<Bounded><A/><o:x xmlns:o="urn:o"/><o:x xmlns:o="urn:o"/><o:x xmlns:o="urn:o"/></Bounded>'),
+        true,
+      ],
+    });
+    expect(verdicts.find((v) => v.name === 'wildcard')?.value).toEqual({
+      W: { '#choice': [{ e1: { a1: 'x' } }, { e2: '' }] },
+    });
+  });
+
+  it('on a local element that contains itself through a group: a definition of its anonymous type', async () => {
+    const files = {
+      'local.xsd': schema(`
+	<xs:element name="Root"><xs:complexType><xs:group ref="Expr"/></xs:complexType></xs:element>
+	<xs:group name="Expr">
+		<xs:choice>
+			<xs:element name="Num" type="xs:integer"/>
+			<xs:element name="Neg"><xs:complexType><xs:group ref="Expr"/></xs:complexType></xs:element>
+		</xs:choice>
+	</xs:group>`),
+    };
+    const { schema: out } = await check(files, {
+      number: [instance('<Num>1</Num>'), true],
+      nested: [instance('<Neg><Neg><Num>2</Num></Neg></Neg>'), true],
+      wrong: [instance('<Neg><Neg><Num>x</Num></Neg></Neg>'), false],
+      empty: [instance('<Neg/>'), false],
+    });
+    expect(prop(out, 'Neg')).toMatchObject({ type: 'object' });
+    expect(prop(prop(out, 'Neg'), 'Neg')).toEqual({ $ref: '#/$defs/Neg', xml: { namespace: 'urn:t' } });
+    expect(prop(def(out, 'Neg'), 'Neg')).toEqual({ $ref: '#/$defs/Neg', xml: { namespace: 'urn:t' } });
+  });
+
+  it('on INF, -INF and NaN: strings for float and double, as far as bounds, patterns and enumerations allow', async () => {
+    const files = {
+      'special.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="D" type="xs:double" minOccurs="0" maxOccurs="unbounded"/>
+				<xs:element name="Max" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType><xs:restriction base="xs:float"><xs:maxExclusive value="10"/></xs:restriction></xs:simpleType>
+				</xs:element>
+				<xs:element name="FromInf" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="INF"/></xs:restriction></xs:simpleType>
+				</xs:element>
+				<xs:element name="E" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType>
+						<xs:restriction base="xs:double"><xs:enumeration value="1.5"/><xs:enumeration value="NaN"/></xs:restriction>
+					</xs:simpleType>
+				</xs:element>
+				<xs:element name="P" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType><xs:restriction base="xs:double"><xs:pattern value="[^a]*"/></xs:restriction></xs:simpleType>
+				</xs:element>
+				<xs:element name="U" minOccurs="0" maxOccurs="unbounded">
+					<xs:simpleType><xs:union memberTypes="xs:decimal xs:double"/></xs:simpleType>
+				</xs:element>
+				<xs:element name="L" minOccurs="0">
+					<xs:simpleType><xs:list itemType="xs:float"/></xs:simpleType>
+				</xs:element>
+			</xs:sequence>
+			<xs:attribute name="a" type="xs:double"/>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const { verdicts } = await check(files, {
+      all: [instance('<D>INF</D><D>-INF</D><D>NaN</D><D> 1e3 </D>', 'a="-INF"'), true],
+      plusInf: [instance('<D>+INF</D>'), false],
+      lowercase: [instance('<D>inf</D>'), false],
+      belowMax: [instance('<Max>-INF</Max><Max>9.5</Max>'), true],
+      infAboveMax: [instance('<Max>INF</Max>'), false],
+      nanWithBound: [instance('<Max>NaN</Max>'), false],
+      fromInf: [instance('<FromInf>INF</FromInf>'), true],
+      numberBelowInf: [instance('<FromInf>1e308</FromInf>'), false],
+      enumerated: [instance('<E>NaN</E><E>1.50</E>'), true],
+      notEnumerated: [instance('<E>INF</E>'), false],
+      pattern: [instance('<P>INF</P><P>-INF</P>'), true],
+      patternExcludesNaN: [instance('<P>NaN</P>'), false],
+      union: [instance('<U>1.5</U><U>INF</U>'), true],
+      list: [instance('<L>1 INF -INF NaN</L>'), true],
+      beyondDouble: [instance('<D>1E309</D><D>-1E309</D>'), true],
+    });
+    expect(verdicts.find((v) => v.name === 'all')?.value).toEqual({ a: '-INF', D: ['INF', '-INF', 'NaN', 1000] });
+    expect(verdicts.find((v) => v.name === 'list')?.value).toEqual({ L: [1, 'INF', '-INF', 'NaN'] });
   });
 });

@@ -22,6 +22,8 @@ export interface XmlAnnotation {
   anyElement?: boolean;
   /** xs:anyAttribute: other attributes are written as strings */
   anyAttribute?: boolean;
+  /** an element of xs:anyType: its content is written without a schema, like content a wildcard takes */
+  anyType?: boolean;
   /** the `#type` property: the type that xsi:type selects, as `{namespace}local` */
   xsiType?: boolean;
   /** the declared simple type of an element value, as `{namespace}local`: the only type xsi:type may name there */

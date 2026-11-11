@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Elements without a type or of type xs:anyType are mapped like wildcard content (empty as ""); a complex xsi:type
+     uses #type, a simple xsi:type is a mapping error. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:complexType name="K"><xs:sequence><xs:element name="Name" type="xs:string"/></xs:sequence></xs:complexType>
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="free"/>
+        <xs:element name="empty" type="xs:anyType"/>
+        <xs:element name="typed" type="xs:anyType" minOccurs="0"/>
+        <xs:element name="simple" type="xs:anyType" minOccurs="0"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

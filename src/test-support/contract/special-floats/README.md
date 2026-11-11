@@ -1,0 +1,1 @@
+V07: `invalid-nan-below-bound.xml` ist after XSD 1.0 (Datatypes 3.2.5, double; eine Grenze außer einer inklusiven NaN-Grenze schließt NaN aus) ungültig. libxml2 2.13.9 nimmt es fälschlich an. Maßgeblich ist die Spezifikation; das Schema muss das Orakel-JSON ablehnen.

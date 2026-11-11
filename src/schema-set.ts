@@ -1,5 +1,6 @@
 import { DOMParser, type Element, type Node } from '@xmldom/xmldom';
 import { type At, messageOf, type Problems } from './problems.js';
+import { checkDoctype } from './doctype.js';
 
 export const XS = 'http://www.w3.org/2001/XMLSchema';
 const XML_NS = 'http://www.w3.org/XML/1998/namespace';
@@ -20,9 +21,45 @@ export interface QName {
   local: string;
 }
 
-export const MAX_DOCUMENTS = 128;
-export const MAX_FILE_BYTES = 2 * 1024 * 1024;
-const MAX_SET_BYTES = 16 * 1024 * 1024;
+/** Size limits of a schema set; each a positive safe integer. */
+export interface Limits {
+  /** bytes of one document, counted as UTF-8; default 4 MiB */
+  maxFileBytes?: number | undefined;
+  /** bytes of all documents together, a document loaded again for another namespace counted again; default 16 MiB */
+  maxTotalBytes?: number | undefined;
+  /** documents, a document loaded again for another namespace counted again; default 128 */
+  maxDocuments?: number | undefined;
+}
+
+/** Limits with every value set. */
+export type EffectiveLimits = { [K in keyof Limits]-?: number };
+
+export const DEFAULT_LIMITS: EffectiveLimits = {
+  maxFileBytes: 4 * 1024 * 1024,
+  maxTotalBytes: 16 * 1024 * 1024,
+  maxDocuments: 128,
+};
+
+/** The limits with their defaults; throws a TypeError for a value that is no positive safe integer. */
+export function effectiveLimits(limits: Limits = {}): EffectiveLimits {
+  const out = { ...DEFAULT_LIMITS };
+  for (const key of Object.keys(DEFAULT_LIMITS) as (keyof Limits)[]) {
+    const value = limits[key];
+    if (value === undefined) {
+      continue;
+    }
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+      throw new TypeError(`limits.${key} must be a positive safe integer, not ${String(value)}`);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** Thrown by a reader for a document above `maxFileBytes`, before it reads all of it. */
+export class FileTooLarge extends Error {
+  override name = 'FileTooLarge';
+}
 
 /** A global component and the document that declares it. */
 export interface Component {
@@ -166,11 +203,21 @@ export class SchemaSet {
     attributeGroup: new Map(),
   };
   private readonly read: (path: string) => string | undefined;
+  private readonly limits: EffectiveLimits;
+  /** a group or attribute group in xs:redefine -> the definition it replaces, which a reference inside it means */
+  private readonly originals = new Map<Element, Component>();
+  /**
+   * Why no schema may be written although documents were loaded: a size limit or unsafe input left a document out,
+   * or an xs:redefine of a type or an xs:override can't be followed. A partial schema would look usable.
+   */
+  blocked = false;
 
   constructor(
     source: SchemaSource,
     private readonly problems: Problems,
+    limits?: Limits,
   ) {
+    this.limits = effectiveLimits(limits);
     this.read =
       typeof source === 'function' ? source : (path) => (Object.hasOwn(source, path) ? source[path] : undefined);
   }
@@ -210,8 +257,10 @@ export class SchemaSet {
     from: At | undefined,
     includedInto: string | undefined,
   ): SchemaDocument | undefined {
-    if (this.documents.size >= MAX_DOCUMENTS) {
-      this.problems.error('resource-limit', `schema set exceeds ${MAX_DOCUMENTS} documents`, from);
+    const { maxDocuments, maxFileBytes, maxTotalBytes } = this.limits;
+    if (this.documents.size >= maxDocuments) {
+      this.blocked = true;
+      this.problems.error('resource-limit', `the schema set exceeds the limit of ${maxDocuments} documents`, from);
       return undefined;
     }
     this.documents.set(key, null);
@@ -220,7 +269,12 @@ export class SchemaSet {
     try {
       text = this.read(path);
     } catch (e) {
-      this.problems.error('missing-file', `schema document ${path} could not be read: ${messageOf(e)}`, at);
+      if (e instanceof FileTooLarge) {
+        this.blocked = true;
+        this.problems.error('resource-limit', `${path} exceeds the limit of ${maxFileBytes} bytes per file`, at);
+      } else {
+        this.problems.error('missing-file', `schema document ${path} could not be read: ${messageOf(e)}`, at);
+      }
       return undefined;
     }
     if (text === undefined || text === null) {
@@ -230,13 +284,24 @@ export class SchemaSet {
     text = String(text);
     const bytes = new TextEncoder().encode(text).length;
     this.loadedBytes += bytes;
-    if (bytes > MAX_FILE_BYTES || this.loadedBytes > MAX_SET_BYTES) {
-      this.problems.error('resource-limit', 'schema input exceeds the 2 MiB file or 16 MiB set limit', { file: path });
+    if (bytes > maxFileBytes) {
+      this.blocked = true;
+      this.problems.error('resource-limit', `${path} exceeds the limit of ${maxFileBytes} bytes per file`, at);
       return undefined;
     }
-    if (/<!DOCTYPE\b/i.test(text)) {
-      this.problems.error('unsafe-input', 'DOCTYPE declarations are not accepted in schema input', { file: path });
+    if (this.loadedBytes > maxTotalBytes) {
+      this.blocked = true;
+      this.problems.error('resource-limit', `the schema set exceeds the limit of ${maxTotalBytes} bytes`, at);
       return undefined;
+    }
+    const doctype = checkDoctype(text);
+    if (doctype.kind === 'refused') {
+      this.blocked = true;
+      this.problems.error('unsafe-input', `the DOCTYPE declaration is refused: ${doctype.reason}`, { file: path });
+      return undefined;
+    }
+    if (doctype.kind === 'neutralized') {
+      text = doctype.text;
     }
     let root: Element | null;
     try {
@@ -255,6 +320,26 @@ export class SchemaSet {
     if (!root || root.namespaceURI !== XS || root.localName !== 'schema') {
       this.problems.error('not-a-schema', `${path} is no XML Schema document`, { file: path });
       return undefined;
+    }
+    if (doctype.kind === 'neutralized') {
+      // A namespace default of the DTD changes nothing only where the root element states the same value itself.
+      const differing = doctype.defaults.find(
+        (d) => d.element !== root.nodeName || !root.hasAttribute(d.name) || root.getAttribute(d.name) !== d.value,
+      );
+      if (differing) {
+        this.blocked = true;
+        this.problems.error(
+          'unsafe-input',
+          `the DOCTYPE declaration is refused: its default ${differing.name}="${differing.value}" for ${differing.element} is not stated the same way by the root element`,
+          { file: path },
+        );
+        return undefined;
+      }
+      this.problems.warning(
+        'neutralized-doctype',
+        'the DOCTYPE declaration changes nothing and is ignored; its identifiers are not read',
+        { file: path },
+      );
     }
     let doc = new SchemaDocument(path, root, includedInto);
     if (doc.chameleon && key === path) {
@@ -303,11 +388,82 @@ export class SchemaSet {
             at,
           );
         }
-      } else if (child.localName === 'redefine' || child.localName === 'override') {
-        this.problems.error('unsupported-redefine', `xs:${child.localName} is not supported`, at);
+      } else if (child.localName === 'redefine') {
+        this.redefine(child, doc, path);
+      } else if (child.localName === 'override') {
+        this.blocked = true;
+        this.problems.error('unsupported-redefine', 'xs:override (XML Schema 1.1) is not supported', at);
       }
     }
     return doc;
+  }
+
+  /**
+   * xs:redefine: includes a document and replaces some of its groups and attribute groups. A reference to the same
+   * name inside a replacing definition means the replaced one. Redefined types are not supported.
+   */
+  private redefine(node: Element, doc: SchemaDocument, path: string): void {
+    const at = { file: path, node };
+    const location = attr(node, 'schemaLocation');
+    if (location === undefined) {
+      this.problems.error('missing-file', 'xs:redefine without schemaLocation', at);
+      return;
+    }
+    const target = this.load(resolvePath(path, location), at, doc.targetNamespace);
+    if (target && target.targetNamespace !== doc.targetNamespace) {
+      this.problems.error(
+        'unsupported-include',
+        `${target.path} has the target namespace ${target.targetNamespace || '(none)'}, not that of the redefining document`,
+        at,
+      );
+      return;
+    }
+    for (const child of xsChildren(node)) {
+      const childAt = { file: path, node: child };
+      const kind = child.localName;
+      const name = attr(child, 'name');
+      if ((kind === 'group' || kind === 'attributeGroup') && name !== undefined) {
+        const table = this.components[kind];
+        const id = clark(doc.targetNamespace, name);
+        const original = table.get(id);
+        if (!original) {
+          this.problems.error(
+            'unknown-group',
+            `xs:redefine replaces ${kind} ${name}, which ${location} does not define`,
+            childAt,
+          );
+          continue;
+        }
+        this.originals.set(child, original);
+        table.set(id, { node: child, doc });
+      } else {
+        this.blocked = true;
+        this.problems.error(
+          'unsupported-redefine',
+          `xs:redefine of a ${kind ?? 'component'} is not supported, only of groups and attribute groups; no schema is written`,
+          childAt,
+        );
+      }
+    }
+  }
+
+  /**
+   * The group or attribute group a reference names. Inside a definition that replaces it in xs:redefine, a
+   * reference to the same name means the replaced definition.
+   */
+  lookupRef(kind: 'group' | 'attributeGroup', name: QName, ref: Element): Component | undefined {
+    const id = clark(name.ns, name.local);
+    for (let node: Node | null = ref.parentNode; node; node = node.parentNode) {
+      const original = isElement(node) ? this.originals.get(node) : undefined;
+      if (
+        original &&
+        node.localName === kind &&
+        clark(original.doc.targetNamespace, attr(node as Element, 'name') ?? '') === id
+      ) {
+        return original;
+      }
+    }
+    return this.lookup(kind, name);
   }
 
   /** Resolves a QName written in an attribute value against the namespaces in scope of `node`. */

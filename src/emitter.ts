@@ -4,6 +4,7 @@
 // docs/output.md describes the result.
 
 import type { Element } from '@xmldom/xmldom';
+import { attributeKey, elementKey, planKeys, renameObject } from './keys.js';
 import { ContentModel, emptyFragment, type Fragment, occurs, type Prop, writeObject } from './content-model.js';
 import { Definitions } from './definitions.js';
 import type { JsonSchema, XmlAnnotation } from './json-schema.js';
@@ -52,6 +53,10 @@ export class Emitter {
   private readonly simple: SimpleTypes;
   private readonly contentModel: ContentModel;
   private readonly definitions = new Definitions();
+  /** the anonymous complex types of local elements being written, to stop one that contains itself */
+  private readonly openLocal = new Set<Element>();
+  /** the final property names of the object of each complex type, for its nil form */
+  private readonly keyPlans = new Map<Element, Map<string, string>>();
   private rootId: string | undefined;
   private readonly poly: Polymorphism;
 
@@ -70,6 +75,7 @@ export class Emitter {
       (node, doc, particle) => this.elementProperty(node, doc, particle),
       options.xml,
       (node) => this.substitutes(node),
+      options.textProperty,
     );
   }
 
@@ -206,6 +212,9 @@ export class Emitter {
     let schema: JsonSchema;
     let valueType: SimpleTypeRef | undefined;
     let textType: SimpleTypeRef | undefined;
+    if (name === undefined ? !anonymousComplex && !anonymousSimple : name.ns === XS && name.local === 'anyType') {
+      return this.withValues(this.anyTypeSchema(decl), node, { ns: XS, local: 'anySimpleType' });
+    }
     if (name !== undefined) {
       schema = this.typeRef(name, node);
       const complex = this.set.lookup('complexType', name);
@@ -225,17 +234,46 @@ export class Emitter {
         schema = { $ref: '#' };
       } else if (decl.global && !inline) {
         schema = this.definitions.ref('element', id, decl.name, () => this.complexType(anonymousComplex, decl.doc));
+      } else if (this.openLocal.has(anonymousComplex)) {
+        // A local element that contains itself through its content refers to a definition of its type.
+        const at = this.set.at(anonymousComplex);
+        const where = `${at.file ?? ''}:${anonymousComplex.lineNumber ?? 0}:${anonymousComplex.columnNumber ?? 0}`;
+        schema = this.definitions.ref('local', `${id} ${where}`, decl.name, () =>
+          this.localComplexType(anonymousComplex, decl.doc),
+        );
       } else {
-        schema = this.complexType(anonymousComplex, decl.doc);
+        schema = this.localComplexType(anonymousComplex, decl.doc);
       }
     } else if (anonymousSimple) {
       schema = this.simple.schema(anonymousSimple);
       valueType = anonymousSimple;
     } else {
       schema = {};
-      valueType = { ns: XS, local: 'anySimpleType' };
     }
     return this.withValues(schema, node, valueType, textType);
+  }
+
+  /** The anonymous complex type of a local element, marked as open while it is written. */
+  private localComplexType(node: Element, doc: SchemaDocument): JsonSchema {
+    this.openLocal.add(node);
+    try {
+      return this.complexType(node, doc);
+    } finally {
+      this.openLocal.delete(node);
+    }
+  }
+
+  /**
+   * An element without a type, or of xs:anyType, takes any content: it is written without a schema, like content a
+   * wildcard takes, and marked with `xml.anyType`.
+   */
+  private anyTypeSchema(decl: ElementDeclaration): JsonSchema {
+    this.problems.warning(
+      'unsupported-any',
+      `${decl.name} is of xs:anyType: its content is written without a schema and isn't checked`,
+      this.set.at(decl.node),
+    );
+    return this.options.xml ? { xml: { anyType: true } } : {};
   }
 
   /**
@@ -404,18 +442,43 @@ export class Emitter {
           );
         }
         values[keyword] = value.value;
+        if (keyword === 'const') {
+          this.fixedByValue(values, type, lexical, node);
+        }
       }
     }
     if (valueType !== undefined) {
-      return { ...schema, ...values };
+      return withPattern({ ...schema, ...without(values, 'pattern') }, values.pattern);
     }
     const key = this.options.textProperty;
     const text = schema.properties?.[key];
-    return {
-      ...schema,
-      type: 'object',
-      properties: { ...schema.properties, [key]: { ...(typeof text === 'object' ? text : {}), ...values } },
-    };
+    const textSchema = withPattern(
+      { ...(typeof text === 'object' ? text : {}), ...without(values, 'pattern') },
+      values.pattern,
+    );
+    return { ...schema, type: 'object', properties: { ...schema.properties, [key]: textSchema } };
+  }
+
+  /**
+   * A fixed value compares values, not text: where the value has several spellings, `const` becomes a pattern of all
+   * of them and the value moves to `default`, the value an empty element takes. Where they can't be listed (a float
+   * or double member of a union), the value is only a `default`.
+   */
+  private fixedByValue(values: JsonSchema, type: SimpleTypeRef, lexical: string, node: Element): void {
+    const forms = this.simple.fixedForms(type, lexical, node);
+    if ('unlisted' in forms) {
+      this.problems.warning(
+        'unsupported-union',
+        `the fixed value ${lexical} is a value of ${forms.unlisted}, whose spellings can't be listed; it is not checked`,
+        this.set.at(node),
+      );
+    } else if (forms.pattern === undefined) {
+      return;
+    } else {
+      values.pattern = forms.pattern;
+    }
+    values.default = values.const;
+    delete values.const;
   }
 
   /**
@@ -439,7 +502,8 @@ export class Emitter {
       forms.push({ type: 'null' });
     }
     const key = this.options.textProperty;
-    const clash = attributes.find((a) => a.key === key);
+    const plan = this.keyPlan(decl);
+    const clash = attributes.find((a) => (plan.get(a.key) ?? a.key) === key);
     if (clash) {
       this.problems.error(
         'duplicate-name',
@@ -459,6 +523,7 @@ export class Emitter {
       properties[key] = this.options.xml ? { type: 'null', xml: { text: true } } : { type: 'null' };
       required.push(key);
       const form: JsonSchema = { type: 'object', properties, required };
+      renameObject(form, plan, this.options.xml);
       if (!anyAttribute) {
         form.additionalProperties = false;
       } else if (this.options.xml) {
@@ -475,6 +540,27 @@ export class Emitter {
       out.xml = { nillable: true };
     }
     return out;
+  }
+
+  /** The final property names of the object of an element declaration's complex type; see `planKeys`. */
+  private keyPlan(decl: ElementDeclaration): Map<string, string> {
+    const typeName = this.poly.typeName(decl.node);
+    const named = typeName === undefined ? undefined : this.set.lookup('complexType', typeName);
+    const node = named?.node ?? xsChild(decl.node, 'complexType');
+    if (!node) {
+      return new Map();
+    }
+    let plan = this.keyPlans.get(node);
+    if (plan === undefined) {
+      // A type that holds a nillable element of its own type asks again while its content is read: the keys of
+      // that inner pass are not used.
+      this.keyPlans.set(node, new Map());
+      const { fragment, attributes } = this.content(node, named?.doc ?? decl.doc);
+      const keys = [...attributes.filter((a) => !a.prohibited).map((a) => a.key), ...fragment.props.map((p) => p.key)];
+      plan = planKeys(keys, this.options.textProperty);
+      this.keyPlans.set(node, plan);
+    }
+    return plan;
   }
 
   /** The attributes the type of an element declaration has, inherited ones included. */
@@ -545,7 +631,7 @@ export class Emitter {
       return list;
     };
     return {
-      key: decl.name,
+      key: elementKey(decl.ns, decl.name),
       schema: max > 1 ? array(min, max) : annotate(item, decl.docs, xml),
       node,
       occurrences: { identity: `{${decl.ns}}${JSON.stringify(item)}`, min, max, array },
@@ -574,8 +660,9 @@ export class Emitter {
       const qualified = form === undefined ? doc.attributeQualified : form === 'qualified';
       ns = qualified ? doc.targetNamespace : '';
     }
-    const key = attr(decl, 'name') ?? '';
-    const id = clark(ns, key);
+    const local = attr(decl, 'name') ?? '';
+    const id = clark(ns, local);
+    const key = attributeKey(ns, local);
     const use = attr(node, 'use') ?? 'optional';
     if (use === 'prohibited') {
       return { id, key, prohibited: true };
@@ -592,7 +679,7 @@ export class Emitter {
       schema = this.simple.schema(anonymous);
     } else {
       valueType = { ns: XS, local: 'anySimpleType' };
-      schema = {};
+      schema = { type: 'string' };
     }
     // Values written on the reference win over those of the declaration.
     const valueNode = attr(node, 'fixed') !== undefined || attr(node, 'default') !== undefined ? node : decl;
@@ -624,13 +711,19 @@ export class Emitter {
         }
       } else if (child.localName === 'attributeGroup') {
         const ref = attr(child, 'ref') ?? '';
-        const group = this.set.lookup('attributeGroup', this.set.resolveQName(child, ref));
+        const group = this.set.lookupRef('attributeGroup', this.set.resolveQName(child, ref), child);
         if (!group) {
           this.problems.error('unknown-group', `attribute group ${ref} is not defined`, this.set.at(child));
         } else if (seen.has(group.node)) {
           this.problems.error('circular-group', `attribute group ${ref} refers to itself`, this.set.at(child));
         } else {
-          out.push(...this.attributes(group.node, group.doc, fragment, new Set([...seen, group.node])));
+          // A prohibited attribute in an attribute group corresponds to nothing (XML Schema Part 1, 3.2.2): only one
+          // written in the restriction itself removes an attribute of the base.
+          out.push(
+            ...this.attributes(group.node, group.doc, fragment, new Set([...seen, group.node])).filter(
+              (a) => !a.prohibited,
+            ),
+          );
         }
       } else if (child.localName === 'anyAttribute') {
         fragment.anyAttribute = true;
@@ -667,7 +760,7 @@ export class Emitter {
     if (derivation) {
       this.checkXsd11Content(derivation);
     }
-    if (attr(node, 'mixed') === 'true' || (complexContent && attr(complexContent, 'mixed') === 'true')) {
+    if (isTrue(attr(node, 'mixed')) || (complexContent && isTrue(attr(complexContent, 'mixed')))) {
       return this.mixedContent(node, derivation, doc, seen);
     }
     if (derivation) {
@@ -773,7 +866,7 @@ export class Emitter {
         case 'all':
           return this.particlesAllowElements(child, groups);
         case 'group': {
-          const group = this.set.lookup('group', this.set.resolveQName(child, attr(child, 'ref') ?? ''));
+          const group = this.set.lookupRef('group', this.set.resolveQName(child, attr(child, 'ref') ?? ''), child);
           if (!group || groups.has(group.node)) {
             return false;
           }
@@ -869,28 +962,12 @@ export class Emitter {
       if (attribute.prohibited) {
         continue;
       }
-      if (Object.hasOwn(properties, attribute.key)) {
-        this.problems.error(
-          'duplicate-name',
-          `${attribute.key} is the name of two attributes in different namespaces`,
-          this.set.at(attribute.node),
-        );
-        continue;
-      }
       properties[attribute.key] = attribute.schema;
       if (attribute.required) {
         required.push(attribute.key);
       }
     }
     for (const prop of fragment.props) {
-      if (Object.hasOwn(properties, prop.key)) {
-        this.problems.error(
-          'duplicate-name',
-          `${prop.key} is the name of an attribute and an element`,
-          this.set.at(prop.node),
-        );
-        continue;
-      }
       properties[prop.key] = prop.schema;
     }
     required.push(...fragment.required.filter((key) => !required.includes(key)));
@@ -908,6 +985,10 @@ export class Emitter {
         ? { '#type': this.typeProperty([clark(doc.targetNamespace, name)]), ...properties }
         : properties;
     writeObject(schema, typed, required, fragment, this.options.xml);
+    const plan = planKeys(Object.keys(typed), this.options.textProperty);
+    for (const clash of renameObject(schema, plan, this.options.xml)) {
+      this.problems.error('duplicate-name', `${clash} is the name of two properties`, this.set.at(node));
+    }
     return schema;
   }
 }
@@ -929,6 +1010,17 @@ function overrideAttributes(base: AttributeProp[], own: AttributeProp[]): Attrib
   return [...byId.values()].filter((a) => !a.prohibited);
 }
 
+/** Adds a pattern to a schema; next to a pattern of its own, as one more part of `allOf`. */
+function withPattern(schema: JsonSchema, pattern: string | undefined): JsonSchema {
+  if (pattern === undefined) {
+    return schema;
+  }
+  if (schema.pattern === undefined) {
+    return { ...schema, pattern };
+  }
+  return { ...schema, allOf: [...(schema.allOf ?? []), { pattern }] };
+}
+
 function annotate(schema: JsonSchema, description: string | undefined, xml: XmlAnnotation | undefined): JsonSchema {
   if (!description && !xml) {
     return schema;
@@ -948,7 +1040,7 @@ function annotate(schema: JsonSchema, description: string | undefined, xml: XmlA
 }
 
 /** What the `xml` annotation of a type written in place says about its values, kept next to that of a property. */
-const TYPE_XML = ['whiteSpace', 'list', 'type', 'nillable', 'anyElement', 'anyAttribute'] as const;
+const TYPE_XML = ['whiteSpace', 'list', 'type', 'nillable', 'anyElement', 'anyAttribute', 'anyType'] as const;
 
 /** The `xml` annotation of a property, keeping what the annotation of a type written in place says about values. */
 function withTypeXml(xml: XmlAnnotation, schema: JsonSchema): XmlAnnotation {

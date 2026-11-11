@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { convertFile } from './node.js';
 import { messageOf } from './problems.js';
+import type { Limits } from './schema-set.js';
 
 export const USAGE = `Usage: xsd-to-jsonschema <entry.xsd> [options]
 
@@ -16,6 +17,9 @@ Options:
   --text-property <name> property for the text of elements with simple content (default: value)
   --out <file>           write to a file instead of stdout
   --base-dir <directory> directory schemas may be read from (default: the entry's directory)
+  --max-file-bytes <n>   bytes per schema document (default: 4194304)
+  --max-total-bytes <n>  bytes of all schema documents (default: 16777216)
+  --max-documents <n>    schema documents (default: 128)
   --strict               also exit with 1 on warnings
   -h, --help             show this help
 
@@ -26,7 +30,14 @@ Exit codes:
   0  schema written without errors (warnings are allowed unless --strict is set)
   1  schema written, but errors or, with --strict, warnings were reported
   2  no schema written: bad arguments, an unreadable entry schema, a missing or unknown
-     root element, or an output file that can't be written`;
+     root element, a size limit or unsafe input in any schema document, or an output
+     file that can't be written`;
+
+const LIMIT_OPTIONS = [
+  ['max-file-bytes', 'maxFileBytes'],
+  ['max-total-bytes', 'maxTotalBytes'],
+  ['max-documents', 'maxDocuments'],
+] as const;
 
 export interface Io {
   stdout(text: string): void;
@@ -52,6 +63,9 @@ function readArguments(argv: string[], io: Io) {
         'text-property': { type: 'string', default: 'value' },
         out: { type: 'string' },
         'base-dir': { type: 'string' },
+        'max-file-bytes': { type: 'string' },
+        'max-total-bytes': { type: 'string' },
+        'max-documents': { type: 'string' },
         strict: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -101,9 +115,23 @@ export function run(argv: string[], io: Io = processIo): number {
     io.stderr('--text-property must not be empty\n');
     return 2;
   }
+  const limits: Limits = {};
+  for (const [option, key] of LIMIT_OPTIONS) {
+    const text = values[option];
+    if (text === undefined) {
+      continue;
+    }
+    const value = /^[0-9]+$/.test(text) ? Number(text) : NaN;
+    if (!Number.isSafeInteger(value) || value < 1) {
+      io.stderr(`--${option} must be a positive integer\n`);
+      return 2;
+    }
+    limits[key] = value;
+  }
   const { schema, problems } = convertFile(entry, {
     root: values.root,
     baseDirectory: values['base-dir'],
+    limits,
     options: { dateTime, xml: !values['no-xml'], textProperty: values['text-property'] },
   });
   for (const p of problems) {

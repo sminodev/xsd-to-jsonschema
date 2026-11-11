@@ -211,13 +211,6 @@ describe('convert', () => {
       expect(
         problemsOf(
           type(
-            '><xs:sequence><xs:element name="B" type="xs:string"/></xs:sequence><xs:attribute name="B" type="xs:string"/>',
-          ),
-        ),
-      ).toEqual(['duplicate-name']);
-      expect(
-        problemsOf(
-          type(
             '><xs:sequence><xs:element name="B" type="xs:string"/><xs:element name="B" type="xs:integer"/></xs:sequence>',
           ),
         ),
@@ -233,9 +226,6 @@ describe('convert', () => {
           '><xs:sequence><xs:element name="B" type="xs:string"/><xs:element name="C" type="xs:string"/><xs:element name="B" type="xs:integer"/></xs:sequence>',
         ),
         type(
-          '><xs:sequence><xs:element name="B" type="xs:string"/></xs:sequence><xs:attribute name="B" type="xs:string" use="required"/>',
-        ),
-        type(
           '><xs:choice><xs:sequence><xs:element name="B" type="xs:string"/><xs:element name="B" type="xs:integer"/></xs:sequence><xs:element name="C" type="xs:string"/></xs:choice>',
         ),
       ];
@@ -246,21 +236,29 @@ describe('convert', () => {
       }
     });
 
-    it('for attributes of one local name in two namespaces, keeping the first', () => {
+    it('name colliding properties by namespace, planned from the whole object', () => {
       const { schema: out, problems } = convert({
         files: {
           'a.xsd': schema(
             '<xs:attribute name="id" type="xs:integer"/>' +
-              '<xs:element name="A"><xs:complexType><xs:attribute ref="t:id" use="required"/>' +
-              '<xs:attribute name="id" type="xs:string" form="unqualified"/></xs:complexType></xs:element>',
+              '<xs:element name="A"><xs:complexType><xs:sequence><xs:element name="B" type="xs:string"/></xs:sequence>' +
+              '<xs:attribute ref="t:id" use="required"/><xs:attribute name="id" type="xs:string" form="unqualified"/>' +
+              '<xs:attribute name="B" type="xs:string" use="required"/></xs:complexType></xs:element>',
           ),
         },
         entry: 'a.xsd',
         root: 'A',
       });
-      expect(codes(problems)).toEqual(['duplicate-name']);
-      expect(out?.properties?.['id']).toMatchObject({ type: 'integer' });
-      expect(out?.required).toEqual(['id']);
+      expect(problems).toEqual([]);
+      // Attributes of one local name from two namespaces: @{namespace}local; an attribute named like an element: @local.
+      expect(out?.properties).toEqual({
+        '@{urn:t}id': { type: 'integer', xml: { name: 'id', namespace: 'urn:t', attribute: true } },
+        '@{}id': { type: 'string', xml: { name: 'id', attribute: true } },
+        '@B': { type: 'string', xml: { name: 'B', attribute: true } },
+        B: { type: 'string', xml: { namespace: 'urn:t', type: '{http://www.w3.org/2001/XMLSchema}string' } },
+      });
+      expect(out?.required).toEqual(['@{urn:t}id', '@B', 'B']);
+      expect(() => ajvFor(out ?? {})).not.toThrow();
     });
 
     it('keeps inherited attributes apart by namespace', () => {
@@ -277,19 +275,79 @@ describe('convert', () => {
         entry: 'a.xsd',
         root: 'A',
       });
-      expect(codes(problems)).toEqual(['duplicate-name']);
-      expect(out?.properties?.['id']).toMatchObject({ type: 'integer' });
+      expect(problems).toEqual([]);
+      expect(out?.properties?.['@{urn:t}id']).toMatchObject({ type: 'integer' });
+      expect(out?.properties?.['@{}id']).toMatchObject({ type: 'string' });
+    });
+
+    it('report a repeated group with the name of the text property, which every object reserves', () => {
+      const body =
+        '<xs:element name="A"><xs:complexType><xs:sequence><xs:group ref="text" maxOccurs="2"/></xs:sequence>' +
+        '</xs:complexType></xs:element><xs:group name="text"><xs:sequence><xs:element name="B"/></xs:sequence></xs:group>';
+      const { problems } = convert({
+        files: { 'a.xsd': schema(body) },
+        entry: 'a.xsd',
+        root: 'A',
+        options: { textProperty: '#text' },
+      });
+      expect(codes(problems)).toContain('duplicate-name');
+    });
+
+    it('name an attribute with the name of the text property @local; the text property keeps its name', () => {
+      const body =
+        '<xs:element name="A"><xs:complexType><xs:simpleContent><xs:extension base="xs:string">' +
+        '<xs:attribute name="value" type="xs:string"/></xs:extension></xs:simpleContent></xs:complexType></xs:element>';
+      const { schema: out, problems } = convert({ files: { 'a.xsd': schema(body) }, entry: 'a.xsd', root: 'A' });
+      expect(problems).toEqual([]);
+      expect(Object.keys(out?.properties ?? {})).toEqual(['@value', 'value']);
+      expect(out?.properties?.['@value']).toMatchObject({ xml: { name: 'value', attribute: true } });
     });
 
     it('for numbers a JSON number cannot hold exactly', () => {
       const big = '9223372036854775807';
       const restricted = (facets: string) =>
         `<xs:element name="A"><xs:simpleType><xs:restriction base="xs:long">${facets}</xs:restriction></xs:simpleType></xs:element>`;
-      expect(problemsOf(restricted(`<xs:maxInclusive value="${big}"/>`))).toEqual(['rounded-number']);
+      const safe = '9007199254740991';
+      // A bound beyond 2^53: other values round onto it. The range of xs:long beyond 2^53 isn't checked.
+      expect(problemsOf(restricted(`<xs:minInclusive value="0"/><xs:maxInclusive value="${big}"/>`))).toEqual([
+        'rounded-number',
+        'unsupported-bound',
+      ]);
       expect(problemsOf(restricted(`<xs:enumeration value="${big}"/>`))).toEqual(['rounded-number']);
-      expect(problemsOf(`<xs:element name="A" type="xs:long" fixed="${big}"/>`)).toEqual(['rounded-number']);
+      expect(problemsOf(`<xs:element name="A" type="xs:long" fixed="${big}"/>`).sort()).toEqual([
+        'rounded-number',
+        'unsupported-bound',
+      ]);
       expect(problemsOf(`<xs:element name="A" type="xs:decimal" fixed="12.50"/>`)).toEqual([]);
-      expect(problemsOf(restricted('<xs:maxInclusive value="9007199254740991"/>'))).toEqual([]);
+      expect(problemsOf(restricted(`<xs:minInclusive value="-${safe}"/><xs:maxInclusive value="${safe}"/>`))).toEqual(
+        [],
+      );
+      // 17 significant digits: two such decimals can round to one number.
+      expect(problemsOf('<xs:element name="A" type="xs:decimal" fixed="1234567890.1234567"/>')).toEqual([
+        'rounded-number',
+      ]);
+      // fractionDigits where values may have more than 15 significant digits.
+      const digits = (facets: string) =>
+        `<xs:element name="A"><xs:simpleType><xs:restriction base="xs:decimal">${facets}</xs:restriction></xs:simpleType></xs:element>`;
+      expect(problemsOf(digits('<xs:fractionDigits value="2"/>'))).toEqual(['rounded-number']);
+      expect(problemsOf(digits('<xs:fractionDigits value="2"/><xs:totalDigits value="15"/>'))).toEqual([]);
+      expect(
+        problemsOf(
+          digits('<xs:fractionDigits value="2"/><xs:minInclusive value="0"/><xs:maxInclusive value="9999.99"/>'),
+        ),
+      ).toEqual([]);
+    });
+
+    it('once per schema for IDs and references to them, which are checked as names only', () => {
+      expect(
+        problemsOf(
+          type(
+            '><xs:sequence><xs:element name="Ref" type="xs:IDREFS"/></xs:sequence>' +
+              '<xs:attribute name="id" type="xs:ID"/><xs:attribute name="other" type="xs:ID"/>',
+          ),
+        ),
+      ).toEqual(['unchecked-id']);
+      expect(problemsOf(type('><xs:attribute name="id" type="xs:NCName"/>'))).toEqual([]);
     });
 
     it('for enumeration values outside the base enumeration', () => {
@@ -496,7 +554,7 @@ describe('convert', () => {
         entry: 'a.xsd',
       });
       expect(problems).toMatchObject([{ code: 'invalid-value', severity: 'error', file: 'a.xsd' }]);
-      expect(out?.type).toBe('number');
+      expect(out?.anyOf?.[0]?.type).toBe('number');
       expect(out).not.toHaveProperty(kind === 'fixed' ? 'const' : 'default');
     });
 
@@ -755,7 +813,7 @@ describe('convert', () => {
         codes(
           run(
             `<xs:element name="A" type="M"/><xs:complexType name="M" mixed="true">${content}</xs:complexType>
-            <xs:complexType name="Base"><xs:sequence><xs:element name="B"/></xs:sequence></xs:complexType>
+            <xs:complexType name="Base"><xs:sequence><xs:element name="B" type="xs:string"/></xs:sequence></xs:complexType>
             <xs:group name="None"><xs:sequence/></xs:group>${extra}`,
           ).problems,
         );
@@ -819,9 +877,7 @@ describe('convert', () => {
           </xs:complexType></xs:element>
         </xs:sequence></xs:complexType></xs:element>`,
       );
-      expect(problems).toMatchObject([
-        { code: 'duplicate-name', message: expect.stringContaining('nil form of V') as string },
-      ]);
+      expect(problems).toEqual([]);
       const p = (key: string) => out?.properties?.[key] as JsonSchema;
       expect(p('S')).toEqual({
         anyOf: [
@@ -844,7 +900,12 @@ describe('convert', () => {
       });
       expect(p('O').items?.anyOf).toHaveLength(2);
       expect(p('O').items?.xml).toEqual({ nillable: true });
-      expect(p('V').anyOf?.map((form) => form.type)).toEqual(['object', 'null']);
+      expect(p('V').anyOf?.map((form) => form.type)).toEqual(['object', 'null', 'object']);
+      // The name of the text property is reserved in every object: the attribute value is @value, also in the nil form.
+      expect(p('V').anyOf?.[2]?.properties).toEqual({
+        '@value': { type: 'string', xml: { name: 'value', attribute: true } },
+        value: { type: 'null', xml: { text: true } },
+      });
     });
 
     it('leave out list, nil and wildcard annotations with xml: false', () => {
@@ -870,6 +931,106 @@ describe('convert', () => {
       );
       expect(out?.xml).toEqual({ name: 'A', namespace: 'urn:t', anyElement: true, anyAttribute: true });
       expect((out?.properties?.['#sequence'] as JsonSchema).items?.xml).toEqual({ anyElement: true });
+    });
+  });
+
+  describe('values compared as XML Schema compares them', () => {
+    const run = (body: string) => convert({ files: { 'a.xsd': schema(body) }, entry: 'a.xsd', root: 'A' });
+    const judge = (out: JsonSchema | undefined, xml: string) => ajvFor(out ?? {})(xmlToJson(out ?? {}, xml));
+
+    it('compare a fixed value by value: other spellings of the value, and the value for an empty element', () => {
+      const { schema: out, problems } = run(
+        `<xs:element name="A"><xs:complexType><xs:sequence>
+          <xs:element name="D" type="xs:date" fixed="2002-01-01Z" minOccurs="0"/>
+          <xs:element name="B" type="xs:boolean" fixed="true" minOccurs="0"/>
+          <xs:element name="T" minOccurs="0" fixed="12:00:00.5">
+            <xs:simpleType><xs:restriction base="xs:time"><xs:pattern value="12:.*"/></xs:restriction></xs:simpleType>
+          </xs:element>
+        </xs:sequence></xs:complexType></xs:element>`,
+      );
+      expect(problems).toEqual([]);
+      // The date pattern of xs:date stays; the spellings of the fixed value are one more pattern next to it.
+      expect(out?.properties?.['D']).toMatchObject({
+        allOf: [{ pattern: '^(?:2002-01-01(?:Z|[+\\-]00:00))$' }],
+        default: '2002-01-01Z',
+      });
+      expect(out?.properties?.['T']).toMatchObject({
+        allOf: [{ pattern: '^(?:12:00:00\\.50*)$' }],
+        default: '12:00:00.5',
+      });
+      const doc = (content: string) => `<A xmlns="urn:t">${content}</A>`;
+      expect(judge(out, doc('<D>2002-01-01-00:00</D><B>1</B><T>12:00:00.50</T>'))).toBe(true);
+      expect(judge(out, doc('<D/><B/><T/>'))).toBe(true);
+      expect(judge(out, doc('<D>2002-01-01</D>'))).toBe(false);
+      expect(judge(out, doc('<T>12:00:00.51</T>'))).toBe(false);
+    });
+
+    it('leave out a fixed value of a union that a float or double member takes, with a warning', () => {
+      const { schema: out, problems } = run(
+        `<xs:element name="A" fixed="1.0"><xs:simpleType><xs:union memberTypes="xs:boolean xs:float"/></xs:simpleType></xs:element>`,
+      );
+      expect(codes(problems)).toEqual(['unsupported-union']);
+      expect(out).not.toHaveProperty('const');
+      expect(out).toMatchObject({ type: 'string', default: '1.0' });
+      expect(judge(out, '<A xmlns="urn:t">1.000</A>')).toBe(true);
+    });
+
+    it('write a choice without possible particles: left out, it adds nothing; required, nothing meets it', () => {
+      const { schema: out, problems } = run(
+        `<xs:element name="A"><xs:complexType><xs:sequence>
+          <xs:choice minOccurs="0"><xs:element name="N" minOccurs="0" maxOccurs="0"/></xs:choice>
+          <xs:element name="B" type="xs:string"/>
+        </xs:sequence></xs:complexType></xs:element>
+        <xs:element name="R"><xs:complexType><xs:choice><xs:element name="N" maxOccurs="0"/></xs:choice></xs:complexType></xs:element>`,
+      );
+      expect(problems).toEqual([]);
+      expect(judge(out, '<A xmlns="urn:t"><B/></A>')).toBe(true);
+      expect(judge(out, '<A xmlns="urn:t"><N/><B/></A>')).toBe(false);
+      const required = convert({
+        files: {
+          'a.xsd': schema(`<xs:element name="R"><xs:complexType><xs:choice>
+        <xs:element name="N" maxOccurs="0"/></xs:choice></xs:complexType></xs:element>`),
+        },
+        entry: 'a.xsd',
+      });
+      expect(required.schema).toMatchObject({ not: {} });
+      expect(() => ajvFor(required.schema ?? {})).not.toThrow();
+    });
+
+    it('read documents with many children, in repeated groups too, without running out of stack', () => {
+      const { schema: out } = run(
+        `<xs:element name="A"><xs:complexType><xs:sequence>
+          <xs:element name="B" type="xs:int" maxOccurs="unbounded"/>
+          <xs:sequence maxOccurs="unbounded"><xs:element name="C" type="xs:int"/><xs:element name="D" type="xs:int"/></xs:sequence>
+        </xs:sequence></xs:complexType></xs:element>`,
+      );
+      const many = '<B>1</B>'.repeat(20000) + '<C>1</C><D>2</D>'.repeat(10000);
+      const json = xmlToJson(out ?? {}, `<A xmlns="urn:t">${many}</A>`) as { B: number[]; '#sequence': unknown[] };
+      expect(json.B).toHaveLength(20000);
+      expect(json['#sequence']).toHaveLength(10000);
+      expect(ajvFor(out ?? {})(json)).toBe(true);
+    });
+
+    it('declare the namespace of an xsi:type value in a fragment of mixed content', () => {
+      const { schema: out } = convert({
+        files: {
+          'a.xsd': `<xs:schema ${XS} xmlns:t="urn:t" targetNamespace="urn:t" elementFormDefault="qualified">
+            <xs:complexType name="B"><xs:sequence/></xs:complexType>
+            <xs:complexType name="D"><xs:complexContent><xs:extension base="t:B"/></xs:complexContent></xs:complexType>
+            <xs:element name="m"><xs:complexType mixed="true"><xs:sequence>
+              <xs:element name="c" type="t:B" minOccurs="0"/></xs:sequence></xs:complexType></xs:element>
+          </xs:schema>`,
+        },
+        entry: 'a.xsd',
+      });
+      const json = xmlToJson(
+        out ?? {},
+        '<m xmlns="urn:t" xmlns:t="urn:t" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">text <c xsi:type="t:D"/></m>',
+      );
+      expect(json).toEqual({
+        value:
+          'text <c xmlns="urn:t" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:t="urn:t" xsi:type="t:D"/>',
+      });
     });
   });
 });
