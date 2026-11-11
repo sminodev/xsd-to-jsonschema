@@ -29,7 +29,9 @@ The test rewrites `examples/order/order.schema.json` and `order.json`, so review
 
 - **Schema document**: one `.xsd` file.
 - **Schema set**: the entry document together with its imports and includes.
-  `xs:import` brings in another namespace; `xs:include` adds definitions to the same namespace.
+  `xs:import` brings in another namespace; `xs:include` adds definitions to the same namespace. An included document
+  without target namespace takes that of the including document (chameleon include) and is loaded once per such
+  namespace.
 - **Global component**: a top-level `xs:element`, `xs:attribute`, `xs:complexType`, `xs:simpleType`, `xs:group` or
   `xs:attributeGroup`. Components are looked up by expanded name: `{namespace}name`.
 - **QName**: a name such as `c:Text40` in `type="c:Text40"`. Its prefix is resolved using the namespace declarations
@@ -48,7 +50,8 @@ The test rewrites `examples/order/order.schema.json` and `order.json`, so review
   order.
 
 `Fragment`, defined in `src/content-model.ts`, represents a model group's properties in document order, required
-properties and choice constraints.
+properties and choice constraints. A repeated group gets a fragment of its own and becomes one property of the
+enclosing fragment.
 
 ## Conversion pipeline
 
@@ -71,11 +74,14 @@ convert()
 - `src/emitter.ts`: element and attribute declarations, `fixed` and `default` values, and complex-type objects.
 - `src/content-model.ts`: sequences, choices, `all` and group references as object properties and constraints.
 - `src/definitions.ts`: `$defs` names and definitions, built in order of first use.
+- `src/polymorphism.ts`: the types `xsi:type` may select and the members of substitution groups, from the derivations
+  between named and built-in types.
 - `src/simple-types.ts`: simple-type restriction chains and merged facets.
 - `src/numeric-facets.ts`: numeric bounds and exact alternatives for combined decimal digit constraints.
 - `src/simple-values.ts`: lexical values and enumeration filtering.
 - `src/decimal.ts`: decimal `multipleOf` arithmetic shared by enumeration checks and the test validator.
 - `src/xsd-regex.ts`: XML Schema patterns translated to anchored JavaScript regular expressions using the `u` flag.
+- `src/name-chars.ts`: the XML name characters of XML 1.0, Second Edition, from Appendix B of the recommendation.
 - `src/json-schema.ts`: types for the generated JSON Schema.
 - `src/problems.ts`: problem codes and diagnostics, including source locations where available.
 - `src/cli.ts` and `src/bin.ts`: CLI entry points. `bin.ts` calls `run()` from `cli.ts`; tests call `run()` directly.
@@ -139,8 +145,10 @@ The pickup/delivery choice produces this `oneOf` constraint:
 4. Fix the responsible module and run `npm test`. If the order example changes, inspect the difference before
    running `UPDATE_EXAMPLES=1 npm test`, then review `git diff -- examples`.
 
-libxml2 may accept elements declared with `maxOccurs="0"`. For such differences from the specification, add a unit
-test in `src/convert.test.ts` and explain the expected result.
+libxml2 deviates from the specification in a few places: it may accept elements declared with `maxOccurs="0"`, it
+rejects whitespace around a date or time value, it accepts some characters outside the base64 alphabet, and it skips
+the facets of a restricted union that is itself a union member. For such differences, add a unit test in
+`src/convert.test.ts` and explain the expected result.
 
 ## Tests
 
@@ -159,6 +167,7 @@ Tests live beside the source (`src/*.test.ts`); shared helpers are in `src/test-
 | `src/cli.test.ts`                | `convertFile` and the CLI, using files in a temporary directory.           |
 | `src/index.test.ts`              | The main entry point has no Node.js built-in dependencies.                 |
 | `src/differential.test.ts`       | Whether XML and JSON validation agree on the same documents.               |
+| `src/contract.test.ts`           | The JSON contract cases in `src/test-support/contract`.                    |
 | `src/example.test.ts`            | The order example and README excerpt match the converter.                  |
 
 Each differential test pairs a small XSD with XML documents expected to pass or fail. Each document is checked in
@@ -167,11 +176,25 @@ both representations:
 1. As XML, against the XSD, with libxml2 through [xmllint-wasm](https://www.npmjs.com/package/xmllint-wasm).
 2. As JSON, against the generated schema, with [Ajv](https://ajv.js.org).
 
-`src/test-support/xml-to-json.ts` maps the XML fixtures to JSON using the generated schema. This helper is test-only
-and is not exported. The test validator uses the decimal `multipleOf` check in `src/decimal.ts`; see
-`src/test-support/oracle.ts`.
+`src/test-support/xml-to-json.ts` maps the XML fixtures to JSON using the generated schema. This helper is test-only and
+is not exported. It follows the `xml` annotations: `whiteSpace`, `list`, `nillable`, `anyElement`, `anyAttribute`,
+`anyType`, `xsiType`, `type` and `decimal` tell it how to read text, lists, nil elements, wildcard content and
+`xsi:type`. For a union it takes the first `anyOf` branch that accepts the text. Where repeated groups allow several
+readings of the children, it tries them in order, within a bounded search, and keeps the first one the schema accepts.
+
+It throws a `MappingError` when a document has no JSON form: `code` says why and `path` where (`/root/child`).
+`xsi-type-simple`, `name-collision` and `reading-limit` are limits of the mapping, marked with `limit`: the XML may be
+valid. `nil-content`, `not-nillable`, `invalid-nil`, `unknown-type` and `undeclared-prefix` mean the XML is invalid. The
+differential tests count each of them as a rejection.
+
+The test validator uses the decimal `multipleOf` check in `src/decimal.ts`; see `src/test-support/oracle.ts`.
 
 The decimal regressions use inline XSDs and require no external schema files.
+
+Each contract case in `src/test-support/contract` has a `schema.xsd` and documents: `valid*.xml` maps to exactly
+`valid*.json`, which the schema accepts; the schema rejects the JSON of `invalid-*.xml`, or the mapping fails;
+`mapping-error-*.xml` is valid XML whose mapping must fail. `CASES` in `src/contract.test.ts` lists the cases the
+converter supports.
 
 Both validators must agree with the expected result. Test cases must also account for the JSON
 [representation limits](output.md#limits).

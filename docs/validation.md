@@ -27,7 +27,7 @@ function decimal(value) {
   return [BigInt(whole + fraction), fraction.length - Number(exponent)];
 }
 
-const ajv = new Ajv2020({ strict: true, strictRequired: false, allErrors: true });
+const ajv = new Ajv2020({ strict: true, strictRequired: false, allErrors: true, ownProperties: true });
 addFormats(ajv);
 ajv.addKeyword('xml');
 ajv.removeKeyword('multipleOf');
@@ -70,8 +70,20 @@ Conversion warnings are printed but do not stop validation. To reject warnings t
 `Ajv2020` selects Draft 2020-12. The setting `strictRequired: false` allows choice branches to require properties
 declared in the enclosing object while leaving other strict checks enabled.
 
+`ownProperties: true` makes Ajv look at the own properties of a JSON object only. XML names such as `constructor` or
+`toString` are ordinary property names; without the setting, Ajv takes the inherited `constructor` of every object for
+a property that is present, and `required` passes although the document has no such element. Build JSON objects with
+`JSON.parse`, `Object.fromEntries` or `Object.defineProperty`, so that a name such as `__proto__` is an own property
+too. Ajv leaves a property named `__proto__` out of `properties`: it doesn't check its value. So that Ajv doesn't take
+it for an additional property, an object with such a property is closed with `propertyNames` instead of
+`additionalProperties: false`.
+
 Because `xml` is metadata rather than a validation keyword, register it as an annotation, as above, or set
 `options.xml: false` during conversion.
+
+The converter writes the branches of unions flat, so Ajv with its default settings compiles long chains of unions
+quickly. A chain of more than about 250 unions that each restrict the next with their own facets still refers from
+definition to definition, deeper than Ajv's stack allows; Ajv then throws a `RangeError` while compiling.
 
 `ajv-formats` validates formats emitted with `dateTime: 'format'`. For the difference from the default `pattern`
 mode, see [Dates and times](output.md#dates-and-times).

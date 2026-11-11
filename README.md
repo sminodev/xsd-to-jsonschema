@@ -8,9 +8,16 @@ JSON representation and supported XSD constructs.
 
 ## Install
 
+The package is not on npm yet. Build a tarball from a clone and install it in your project:
+
 ```sh
-npm install xsd-to-jsonschema
+npm ci
+npm pack
+cd /path/to/your/project
+npm install /path/to/xsd-to-jsonschema/xsd-to-jsonschema-1.0.0.tgz
 ```
+
+Once the package is published, `npm install xsd-to-jsonschema` replaces these steps.
 
 Node.js 22.13 or later is required. The package is an ES module, but `require()` is also supported on that runtime.
 
@@ -73,9 +80,11 @@ const { schema, problems } = convert({
 
 In this example, `orderXsd`, `lineXsd` and `commonXsd` contain the corresponding XSD documents.
 
-Alternatively, `files` can be a loader function that receives a path and returns the schema text. Absolute import
-URLs reach the function unchanged, allowing it to supply cached or local copies. In contrast, `convertFile` reads
-only local files and reports remote imports as `missing-file`.
+Alternatively, `files` can be a loader function that receives a path and returns the schema text. Absolute import URLs
+reach the function unchanged, allowing it to supply cached or local copies. In contrast, `convertFile` reads only
+relative paths inside the entry's directory: a location outside it or a `file:` URL is reported as `unsafe-input`, a
+remote URL as `missing-file`. For schemas in sibling folders, set `baseDirectory` (CLI: `--base-dir`) to their common
+parent.
 
 ### Root and options
 
@@ -92,15 +101,21 @@ const { schema, problems } = convertFile('order.xsd', {
 });
 ```
 
-| Setting                | CLI flag                 | Default                                | Description                                                       |
-| ---------------------- | ------------------------ | -------------------------------------- | ----------------------------------------------------------------- |
-| `root`                 | `--root <name>`          | The entry schema's only global element | Root element to convert; required if the choice is ambiguous.     |
-| `options.dateTime`     | `--date-time <mode>`     | `pattern`                              | Use XML Schema date/time patterns or JSON Schema `format` values. |
-| `options.xml`          | `--no-xml`               | `true`                                 | Include the `xml` annotations.                                    |
-| `options.textProperty` | `--text-property <name>` | `value`                                | Property for the text of an element with simple content.          |
+| Setting                | CLI flag                 | Default                                | Description                                                                                            |
+| ---------------------- | ------------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `root`                 | `--root <name>`          | The entry schema's only global element | Root element to convert; required if the choice is ambiguous.                                          |
+| `options.dateTime`     | `--date-time <mode>`     | `pattern`                              | Use XML Schema date/time patterns or JSON Schema `format` values.                                      |
+| `options.xml`          | `--no-xml`               | `true`                                 | Include the `xml` annotations.                                                                         |
+| `options.textProperty` | `--text-property <name>` | `value`                                | Property for the text of an element with simple content: an NCName other than `__proto__`, or `#text`. |
+| `baseDirectory`        | `--base-dir <directory>` | The entry's directory                  | Directory schemas may be read from, for `convertFile` and the CLI.                                     |
+| `limits.maxFileBytes`  | `--max-file-bytes <n>`   | `4194304` (4 MiB)                      | Bytes per schema document; see [Schema input](docs/output.md#schema-input).                            |
+| `limits.maxTotalBytes` | `--max-total-bytes <n>`  | `16777216` (16 MiB)                    | Bytes of all schema documents together.                                                                |
+| `limits.maxDocuments`  | `--max-documents <n>`    | `128`                                  | Number of schema documents.                                                                            |
 
 With `dateTime: 'format'`, make sure your validator is configured to validate formats. The accepted date and time
-forms differ from XML Schema; see [Dates and times](docs/output.md#dates-and-times).
+forms differ from XML Schema: RFC 3339 requires a time zone, so `xs:dateTime` and `xs:time` values without one, such as
+`2026-11-04T08:30:00`, are valid XML but rejected in `format` mode. Keep the default `pattern` for XML data that doesn't
+always carry a time zone; see [Dates and times](docs/output.md#dates-and-times).
 
 ## Example: a multi-file order schema
 
@@ -131,7 +146,8 @@ The [generated schema](examples/order/order.schema.json) includes:
 - `oneOf` for the choice between pickup and delivery.
 - `dependentRequired` for the optional pair `DiscountCode` and `DiscountPercent`.
 - Inherited properties in `Contact` and a required `currency` in `Price`.
-- Mixed content in `Note` and a wildcard in `Extensions`, both reported as warnings.
+- Mixed content in `Note` and a wildcard in `Extensions`, both reported as warnings. Content the wildcard takes is
+  written without a schema; the object is marked with `"anyElement": true`.
 
 <details>
 <summary>Show the schema excerpt</summary>
@@ -322,7 +338,12 @@ Tests validate `order.xml` against the XSD and `order.json` against the generate
 ## Output
 
 The root element's content is the top-level JSON value, without a root-name wrapper. Elements and attributes use
-local names, repeated elements become arrays, and named types are stored in `$defs`.
+local names, repeated elements become arrays, repeated groups become arrays of objects, and named types are stored
+in `$defs`.
+
+JSON objects keep no order, so the schema can't check the order of child elements, and some XML Schema rules, such
+as unique IDs, are left out with a warning. A JSON document the schema accepts is therefore no proof that the XML it
+came from is valid; validate XML against the XML Schema itself.
 
 See [Output format](docs/output.md) for the mappings, [limits](docs/output.md#limits) for unsupported behavior, and
 [Validating with Ajv](docs/validation.md) for validator setup.
