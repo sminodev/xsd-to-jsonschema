@@ -10,6 +10,8 @@ export interface XmlAnnotation {
   text?: boolean;
   /** the text property holds mixed content: text and child elements, as XML markup */
   mixed?: boolean;
+  /** the property holds a repeated model group: an array with an object per occurrence */
+  group?: boolean;
 }
 
 export type JsonType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array';
@@ -44,5 +46,6 @@ export interface JsonSchema {
   oneOf?: JsonSchema[];
   anyOf?: JsonSchema[];
   allOf?: JsonSchema[];
+  not?: JsonSchema;
   xml?: XmlAnnotation;
 }

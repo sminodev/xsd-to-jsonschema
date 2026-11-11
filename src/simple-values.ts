@@ -1,8 +1,13 @@
+import { isExact } from './decimal.js';
 import type { JsonSchema, JsonType } from './json-schema.js';
 import { numericViolation } from './numeric-facets.js';
 import type { At, Problems } from './problems.js';
 
-export function lexicalToJson(jsonType: JsonType | undefined, lexical: string): { value: unknown } | { error: string } {
+/** A lexical value as JSON; `rounded` says that a JSON number cannot hold it exactly. */
+export function lexicalToJson(
+  jsonType: JsonType | undefined,
+  lexical: string,
+): { value: unknown; rounded?: true } | { error: string } {
   const text = lexical.trim();
   if (jsonType === 'integer' || jsonType === 'number') {
     if (!/^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(text)) {
@@ -15,7 +20,7 @@ export function lexicalToJson(jsonType: JsonType | undefined, lexical: string): 
     if (jsonType === 'integer' && !Number.isInteger(value)) {
       return { error: `${lexical} is no integer` };
     }
-    return { value };
+    return isExact(text, value) ? { value } : { value, rounded: true };
   }
   if (jsonType === 'boolean') {
     if (text === 'true' || text === '1') {
@@ -70,6 +75,9 @@ export function enumSchema(schema: JsonSchema, values: string[], problems: Probl
       continue;
     }
     const value = converted.value;
+    if (converted.rounded) {
+      problems.warning('rounded-number', `enumeration value ${lexical} is rounded to ${String(value)}`, at);
+    }
     const reason = violation(schema, value);
     if (reason) {
       problems.warning('unreachable-enumeration', `enumeration value ${lexical} is left out: ${reason}`, at);
@@ -86,6 +94,11 @@ export function enumSchema(schema: JsonSchema, values: string[], problems: Probl
   if (schema.format !== undefined) {
     out.format = schema.format;
   }
-  out.enum = kept;
+  // JSON Schema has no empty enum; a type without any value accepts nothing.
+  if (kept.length > 0) {
+    out.enum = kept;
+  } else {
+    out.not = {};
+  }
   return out;
 }

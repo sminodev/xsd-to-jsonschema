@@ -188,6 +188,484 @@ describe('convert: XML Schema and JSON Schema agree', () => {
     });
   });
 
+  it('on a repeated sequence: an array with an object per occurrence', async () => {
+    const files = {
+      'repeat.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="Id" type="xs:string"/>
+				<xs:sequence maxOccurs="2">
+					<xs:element name="A" type="xs:integer"/>
+					<xs:element name="B" type="xs:string" minOccurs="0"/>
+				</xs:sequence>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const id = '<Id>i</Id>';
+    const {
+      schema: out,
+      problems,
+      verdicts,
+    } = await check(files, {
+      once: [instance(`${id}<A>1</A>`), true],
+      twice: [instance(`${id}<A>1</A><B>x</B><A>2</A>`), true],
+      thrice: [instance(`${id}<A>1</A><A>2</A><A>3</A>`), false],
+      none: [instance(id), false],
+      bOnly: [instance(`${id}<B>x</B>`), false],
+      bFirst: [instance(`${id}<B>x</B><A>1</A>`), false],
+      badValue: [instance(`${id}<A>x</A>`), false],
+    });
+    expect(problems).toEqual([]);
+    expect(verdicts.find((v) => v.name === 'twice')?.value).toEqual({
+      Id: 'i',
+      '#sequence': [{ A: 1, B: 'x' }, { A: 2 }],
+    });
+    expect(out.required).toEqual(['Id', '#sequence']);
+    expect(prop(out, '#sequence')).toEqual({
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          A: { type: 'integer', xml: { namespace: 'urn:t' } },
+          B: { type: 'string', xml: { namespace: 'urn:t' } },
+        },
+        required: ['A'],
+        additionalProperties: false,
+      },
+      minItems: 1,
+      maxItems: 2,
+      xml: { group: true },
+    });
+  });
+
+  it('on a repeated choice: each occurrence is one branch', async () => {
+    const files = {
+      'choices.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:choice minOccurs="0" maxOccurs="3">
+				<xs:element name="A" type="xs:integer"/>
+				<xs:sequence>
+					<xs:element name="B" type="xs:string"/>
+					<xs:element name="C" type="xs:string"/>
+				</xs:sequence>
+			</xs:choice>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const { schema: out, verdicts } = await check(files, {
+      empty: [instance(''), true],
+      branchesInTurn: [instance('<A>1</A><B>b</B><C>c</C><A>2</A>'), true],
+      sameBranch: [instance('<A>1</A><A>2</A><A>3</A>'), true],
+      four: [instance('<A>1</A><A>2</A><A>3</A><A>4</A>'), false],
+      halfBranch: [instance('<A>1</A><B>b</B>'), false],
+      cAlone: [instance('<C>c</C>'), false],
+    });
+    expect(verdicts.find((v) => v.name === 'branchesInTurn')?.value).toEqual({
+      '#choice': [{ A: 1 }, { B: 'b', C: 'c' }, { A: 2 }],
+    });
+    expect(out.required).toBeUndefined();
+    expect(prop(out, '#choice').minItems).toBeUndefined();
+  });
+
+  it('on repeated groups inside repeated groups, on references and on numbering', async () => {
+    const files = {
+      'nested.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:sequence maxOccurs="2">
+					<xs:element name="Head" type="xs:string"/>
+					<xs:sequence minOccurs="0" maxOccurs="2">
+						<xs:element name="Key" type="xs:string"/>
+						<xs:element name="Val" type="xs:integer"/>
+					</xs:sequence>
+				</xs:sequence>
+				<xs:element name="Mid" type="xs:string"/>
+				<xs:sequence minOccurs="0" maxOccurs="unbounded">
+					<xs:element name="Tail" type="xs:string"/>
+				</xs:sequence>
+				<xs:group ref="Pair" maxOccurs="2"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	<xs:group name="Pair">
+		<xs:sequence>
+			<xs:element name="L" type="xs:string"/>
+			<xs:element name="R" type="xs:string"/>
+		</xs:sequence>
+	</xs:group>`),
+    };
+    const pair = '<L>l</L><R>r</R>';
+    const { schema: out, verdicts } = await check(files, {
+      flat: [instance(`<Head>h</Head><Mid>m</Mid>${pair}`), true],
+      nested: [
+        instance(
+          `<Head>h</Head><Key>k</Key><Val>1</Val><Key>l</Key><Val>2</Val><Head>i</Head><Mid>m</Mid>${pair}${pair}`,
+        ),
+        true,
+      ],
+      tails: [instance(`<Head>h</Head><Mid>m</Mid><Tail>t</Tail><Tail>u</Tail>${pair}`), true],
+      keyWithoutVal: [instance(`<Head>h</Head><Key>k</Key><Mid>m</Mid>${pair}`), false],
+      threeInner: [instance(`<Head>h</Head>${'<Key>k</Key><Val>1</Val>'.repeat(3)}<Mid>m</Mid>${pair}`), false],
+      noPair: [instance(`<Head>h</Head><Mid>m</Mid>`), false],
+      halfPair: [instance(`<Head>h</Head><Mid>m</Mid>${pair}<L>l</L>`), false],
+    });
+    expect(Object.keys(out.properties ?? {})).toEqual(['#sequence', 'Mid', '#sequence:2', '#Pair']);
+    expect(verdicts.find((v) => v.name === 'nested')?.value).toEqual({
+      '#sequence': [
+        {
+          Head: 'h',
+          '#sequence': [
+            { Key: 'k', Val: 1 },
+            { Key: 'l', Val: 2 },
+          ],
+        },
+        { Head: 'i' },
+      ],
+      Mid: 'm',
+      '#Pair': [
+        { L: 'l', R: 'r' },
+        { L: 'l', R: 'r' },
+      ],
+    });
+  });
+
+  it('on two references to one group: they share its property', async () => {
+    const files = {
+      'twice.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:group ref="Pair" maxOccurs="2"/>
+				<xs:element name="Mid" type="xs:string"/>
+				<xs:group ref="Pair" maxOccurs="2"/>
+				<xs:element name="End" type="xs:string"/>
+				<xs:group ref="Head"/>
+				<xs:element name="Sep" type="xs:string"/>
+				<xs:group ref="Head"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	<xs:group name="Pair">
+		<xs:sequence>
+			<xs:element name="L" type="xs:string"/>
+			<xs:element name="R" type="xs:string"/>
+		</xs:sequence>
+	</xs:group>
+	<xs:group name="Head">
+		<xs:sequence>
+			<xs:element name="H" type="xs:string"/>
+			<xs:sequence maxOccurs="2">
+				<xs:element name="V" type="xs:integer"/>
+			</xs:sequence>
+		</xs:sequence>
+	</xs:group>`),
+    };
+    const pair = '<L>l</L><R>r</R>';
+    const head = '<H>h</H><V>1</V>';
+    const tail = `<End>e</End>${head}<Sep>s</Sep>${head}`;
+    const {
+      schema: out,
+      problems,
+      verdicts,
+    } = await check(files, {
+      least: [instance(`${pair}<Mid>m</Mid>${pair}${tail}`), true],
+      most: [instance(`${pair}${pair}<Mid>m</Mid>${pair}${pair}${tail}`), true],
+      fiveAcrossBoth: [instance(`${pair}${pair}<Mid>m</Mid>${pair}${pair}${pair}${tail}`), false],
+      secondMissing: [instance(`${pair}<Mid>m</Mid>${tail}`), false],
+    });
+    expect(problems).toEqual([]);
+    expect(Object.keys(out.properties ?? {})).toEqual(['#Pair', 'Mid', 'End', 'H', '#sequence', 'Sep']);
+    expect(prop(out, '#Pair').minItems).toBe(2);
+    expect(prop(out, '#Pair').maxItems).toBe(4);
+    expect(verdicts.find((v) => v.name === 'least')?.value).toEqual({
+      '#Pair': [
+        { L: 'l', R: 'r' },
+        { L: 'l', R: 'r' },
+      ],
+      Mid: 'm',
+      End: 'e',
+      H: ['h', 'h'],
+      '#sequence': [{ V: 1 }, { V: 1 }],
+      Sep: 's',
+    });
+  });
+
+  it('on a repeated group in a choice, one that can be empty, and an extension of a base with one', async () => {
+    const files = {
+      'places.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:choice>
+					<xs:element name="None" type="xs:string"/>
+					<xs:sequence maxOccurs="2">
+						<xs:element name="A" type="xs:integer"/>
+					</xs:sequence>
+				</xs:choice>
+				<xs:sequence minOccurs="2" maxOccurs="3">
+					<xs:element name="Opt" type="xs:string" minOccurs="0"/>
+				</xs:sequence>
+				<xs:element name="Derived" type="Derived"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	<xs:complexType name="Base">
+		<xs:sequence maxOccurs="2">
+			<xs:element name="X" type="xs:string"/>
+		</xs:sequence>
+	</xs:complexType>
+	<xs:complexType name="Derived">
+		<xs:complexContent>
+			<xs:extension base="Base">
+				<xs:sequence maxOccurs="2">
+					<xs:element name="Y" type="xs:string"/>
+				</xs:sequence>
+			</xs:extension>
+		</xs:complexContent>
+	</xs:complexType>`),
+    };
+    const derived = '<Derived><X>x</X><Y>y</Y></Derived>';
+    const { schema: out, verdicts } = await check(files, {
+      none: [instance(`<None>n</None>${derived}`), true],
+      numbers: [instance(`<A>1</A><A>2</A>${derived}`), true],
+      both: [instance(`<None>n</None><A>1</A>${derived}`), false],
+      neither: [instance(derived), false],
+      someOpt: [instance(`<None>n</None><Opt>o</Opt><Opt>p</Opt>${derived}`), true],
+      tooManyOpt: [instance(`<None>n</None>${'<Opt>o</Opt>'.repeat(4)}${derived}`), false],
+      moreOfBoth: [instance('<None>n</None><Derived><X>x</X><X>x</X><Y>y</Y><Y>y</Y></Derived>'), true],
+      noY: [instance('<None>n</None><Derived><X>x</X></Derived>'), false],
+    });
+    expect(Object.keys(def(out, 'Derived').properties ?? {})).toEqual(['#sequence', '#sequence:2']);
+    expect(verdicts.find((v) => v.name === 'someOpt')?.value).toEqual({
+      None: 'n',
+      '#sequence:2': [{ Opt: 'o' }, { Opt: 'p' }],
+      Derived: { '#sequence': [{ X: 'x' }], '#sequence:2': [{ Y: 'y' }] },
+    });
+    expect(out.required).not.toContain('#sequence:2');
+  });
+
+  it('on one element name in several particles: an array with the occurrences of all', async () => {
+    const files = {
+      'names.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="A" type="xs:integer"/>
+				<xs:element name="B" type="xs:string"/>
+				<xs:element name="A" type="xs:integer" minOccurs="0"/>
+				<xs:choice>
+					<xs:sequence>
+						<xs:element name="X" type="xs:string"/>
+						<xs:element name="Y" type="xs:string"/>
+						<xs:element name="Z" type="xs:string"/>
+						<xs:element name="Y" type="xs:string"/>
+					</xs:sequence>
+					<xs:sequence>
+						<xs:element name="W" type="xs:string"/>
+						<xs:element name="Y" type="xs:string" minOccurs="0"/>
+					</xs:sequence>
+				</xs:choice>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const ab = '<A>1</A><B>b</B>';
+    const xyz = '<X>x</X><Y>y</Y><Z>z</Z><Y>y</Y>';
+    const {
+      schema: out,
+      problems,
+      verdicts,
+    } = await check(files, {
+      required: [instance(`${ab}${xyz}`), true],
+      withOptional: [instance(`${ab}<A>2</A>${xyz}`), true],
+      tooMany: [instance(`${ab}<A>2</A><A>3</A>${xyz}`), false],
+      noA: [instance(`<B>b</B>${xyz}`), false],
+      w: [instance(`${ab}<W>w</W>`), true],
+      wAndY: [instance(`${ab}<W>w</W><Y>y</Y>`), true],
+      wAndTwoY: [instance(`${ab}<W>w</W><Y>y</Y><Y>y</Y>`), false],
+      oneYInFirstBranch: [instance(`${ab}<X>x</X><Y>y</Y><Z>z</Z>`), false],
+    });
+    expect(problems).toEqual([]);
+    expect(out.required).toEqual(['A', 'B']);
+    expect(prop(out, 'A')).toEqual({
+      type: 'array',
+      items: { type: 'integer' },
+      minItems: 1,
+      maxItems: 2,
+      xml: { namespace: 'urn:t' },
+    });
+    expect(verdicts.find((v) => v.name === 'withOptional')?.value).toEqual({
+      A: [1, 2],
+      B: 'b',
+      X: 'x',
+      Y: ['y', 'y'],
+      Z: 'z',
+    });
+  });
+
+  it('on branches that declare the same element: either may match', async () => {
+    const files = {
+      'same.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:choice>
+				<xs:element name="K" type="xs:string"/>
+				<xs:sequence>
+					<xs:element name="K" type="xs:string"/>
+				</xs:sequence>
+				<xs:element name="M" type="xs:string"/>
+			</xs:choice>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const { schema: out } = await check(files, {
+      k: [instance('<K>k</K>'), true],
+      m: [instance('<M>m</M>'), true],
+      kAndM: [instance('<K>k</K><M>m</M>'), false],
+      twoK: [instance('<K>k</K><K>l</K>'), false],
+      neither: [instance(''), false],
+    });
+    expect(out.oneOf).toBeUndefined();
+    expect(out.anyOf).toHaveLength(3);
+  });
+
+  it('on a choice with several branches that can be empty', async () => {
+    const files = {
+      'empty.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:choice>
+				<xs:element name="A" type="xs:string" minOccurs="0"/>
+				<xs:element name="B" type="xs:string" minOccurs="0"/>
+			</xs:choice>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const { problems } = await check(files, {
+      nothing: [instance(''), true],
+      a: [instance('<A>a</A>'), true],
+      b: [instance('<B>b</B>'), true],
+      both: [instance('<A>a</A><B>b</B>'), false],
+    });
+    expect(problems).toEqual([]);
+  });
+
+  it('on a choice inside an optional sequence: all of the sequence or nothing', async () => {
+    const files = {
+      'optional.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:sequence minOccurs="0">
+					<xs:element name="Head" type="xs:string"/>
+					<xs:choice>
+						<xs:element name="X" type="xs:string"/>
+						<xs:element name="Y" type="xs:string"/>
+					</xs:choice>
+				</xs:sequence>
+				<xs:element name="Tail" type="xs:string"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>`),
+    };
+    const tail = '<Tail>t</Tail>';
+    const { problems } = await check(files, {
+      nothing: [instance(tail), true],
+      headX: [instance(`<Head>h</Head><X>x</X>${tail}`), true],
+      headY: [instance(`<Head>h</Head><Y>y</Y>${tail}`), true],
+      headOnly: [instance(`<Head>h</Head>${tail}`), false],
+      xOnly: [instance(`<X>x</X>${tail}`), false],
+      headXY: [instance(`<Head>h</Head><X>x</X><Y>y</Y>${tail}`), false],
+    });
+    expect(problems).toEqual([]);
+  });
+
+  it('on fixed and default values of simple content, on children, the root and untyped elements', async () => {
+    const price = `<xs:complexType name="Price"><xs:simpleContent><xs:extension base="xs:decimal">
+			<xs:attribute name="currency" type="xs:string"/></xs:extension></xs:simpleContent></xs:complexType>`;
+    const child = await check(
+      {
+        'child.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="Fee" type="Price" fixed="10.00"/>
+				<xs:element name="Mode" fixed="AUTO"/>
+				<xs:element name="Inline" fixed="7">
+					<xs:complexType><xs:simpleContent><xs:extension base="xs:integer"/></xs:simpleContent></xs:complexType>
+				</xs:element>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	${price}`),
+      },
+      {
+        right: [instance('<Fee currency="EUR">10.00</Fee><Mode>AUTO</Mode><Inline>7</Inline>'), true],
+        wrongFee: [instance('<Fee>11</Fee><Mode>AUTO</Mode><Inline>7</Inline>'), false],
+        wrongMode: [instance('<Fee>10.00</Fee><Mode>OTHER</Mode><Inline>7</Inline>'), false],
+        wrongInline: [instance('<Fee>10.00</Fee><Mode>AUTO</Mode><Inline>8</Inline>'), false],
+      },
+    );
+    expect(child.problems).toEqual([]);
+    const root = await check(
+      { 'root.xsd': schema(`<xs:element name="Root" type="Price" fixed="10.00"/>${price}`) },
+      {
+        right: [instance('10.00'), true],
+        wrong: [instance('11'), false],
+      },
+    );
+    expect(root.problems).toEqual([]);
+    expect(prop(root.schema, 'value').const).toBe(10);
+  });
+
+  it('on a name inside and outside a choice or optional group: valid documents pass', async () => {
+    const files = {
+      'overlap.xsd': schema(`
+	<xs:element name="Root">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="First" type="Overlap" minOccurs="0"/>
+				<xs:element name="Second" type="Optional" minOccurs="0"/>
+			</xs:sequence>
+		</xs:complexType>
+	</xs:element>
+	<xs:complexType name="Overlap">
+		<xs:sequence>
+			<xs:choice>
+				<xs:element name="X" type="xs:string"/>
+				<xs:element name="A" type="xs:string"/>
+			</xs:choice>
+			<xs:element name="A" type="xs:string"/>
+		</xs:sequence>
+	</xs:complexType>
+	<xs:complexType name="Optional">
+		<xs:sequence>
+			<xs:element name="A" type="xs:string"/>
+			<xs:sequence minOccurs="0">
+				<xs:element name="A" type="xs:string"/>
+				<xs:element name="B" type="xs:string"/>
+			</xs:sequence>
+		</xs:sequence>
+	</xs:complexType>`),
+    };
+    const { problems } = await check(files, {
+      xThenA: [instance('<First><X>x</X><A>a</A></First>'), true],
+      twoA: [instance('<First><A>a</A><A>a</A></First>'), true],
+      noA: [instance('<First><X>x</X></First>'), false],
+      oneA: [instance('<Second><A>a</A></Second>'), true],
+      twoAAndB: [instance('<Second><A>a</A><A>a</A><B>b</B></Second>'), true],
+      threeA: [instance('<Second><A>a</A><A>a</A><A>a</A><B>b</B></Second>'), false],
+    });
+    expect(problems.map((p) => `${p.severity}:${p.code}`)).toEqual([
+      'warning:approximated-occurrences',
+      'warning:approximated-occurrences',
+    ]);
+  });
+
   it('on facets: lengths, enumerations, patterns, bounds and digits', async () => {
     const files = {
       'facets.xsd': schema(`
@@ -567,7 +1045,11 @@ describe('convert: XML Schema and JSON Schema agree', () => {
 	</xs:complexType>`),
     };
     // The elements inside mixed content are not checked, so the cases leave out documents that only they make invalid.
-    const { schema: out, problems } = await check(files, {
+    const {
+      schema: out,
+      problems,
+      verdicts,
+    } = await check(files, {
       text: [instance('<Note lang="de">Hello <b>World</b>, <i>again</i>!</Note>'), true],
       empty: [instance('<Note lang="de"/>'), true],
       noLang: [instance('<Note>Hello</Note>'), false],
@@ -575,6 +1057,9 @@ describe('convert: XML Schema and JSON Schema agree', () => {
       noNote: [instance(''), false],
     });
     expect(def(out, 'RichText').properties?.['value']).toEqual({ type: 'string', xml: { text: true, mixed: true } });
+    expect(verdicts.find((v) => v.name === 'text')?.value).toEqual({
+      Note: { lang: 'de', value: 'Hello <b xmlns="urn:t">World</b>, <i xmlns="urn:t">again</i>!' },
+    });
     expect(problems.map((p) => `${p.severity}:${p.code}`)).toEqual(['warning:unsupported-mixed']);
   });
 

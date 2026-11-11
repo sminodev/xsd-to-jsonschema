@@ -8,7 +8,7 @@
   "DeliveryDate": "2026-11-20",
   "Wanted": "2026-11",
   "Note": {
-    "value": "Please ring <c:b>twice</c:b>."
+    "value": "Please ring <c:b xmlns:c=\"urn:example:common\">twice</c:b>."
   },
   "DiscountCode": "AUTUMN",
   "DiscountPercent": 10,

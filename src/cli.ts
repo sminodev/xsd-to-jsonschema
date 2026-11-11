@@ -15,6 +15,7 @@ Options:
   --no-xml               leave out the xml annotations
   --text-property <name> property for the text of elements with simple content (default: value)
   --out <file>           write to a file instead of stdout
+  --base-dir <directory> directory schemas may be read from (default: the entry's directory)
   --strict               also exit with 1 on warnings
   -h, --help             show this help
 
@@ -50,6 +51,7 @@ function readArguments(argv: string[], io: Io) {
         'no-xml': { type: 'boolean', default: false },
         'text-property': { type: 'string', default: 'value' },
         out: { type: 'string' },
+        'base-dir': { type: 'string' },
         strict: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -101,6 +103,7 @@ export function run(argv: string[], io: Io = processIo): number {
   }
   const { schema, problems } = convertFile(entry, {
     root: values.root,
+    baseDirectory: values['base-dir'],
     options: { dateTime, xml: !values['no-xml'], textProperty: values['text-property'] },
   });
   for (const p of problems) {

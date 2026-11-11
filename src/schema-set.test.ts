@@ -96,6 +96,46 @@ describe('SchemaSet', () => {
     ]);
   });
 
+  it('does not take inherited members of the files object for documents', () => {
+    expect(load({}, 'toString').problems).toEqual([
+      expect.objectContaining({ code: 'missing-file', message: 'schema document toString not found' }),
+    ]);
+  });
+
+  it('reports an import with another target namespace', () => {
+    const { problems } = load(
+      {
+        'a.xsd': `<xs:schema ${XS}><xs:import namespace="urn:a" schemaLocation="b.xsd"/></xs:schema>`,
+        'b.xsd': `<xs:schema ${XS} targetNamespace="urn:b"/>`,
+      },
+      'a.xsd',
+    );
+    expect(problems).toEqual([expect.objectContaining({ code: 'namespace-mismatch', file: 'a.xsd', line: 1 })]);
+  });
+
+  it('refuses a DOCTYPE', () => {
+    const { doc, problems } = load({ 'a.xsd': `<!DOCTYPE schema [<!ENTITY x "y">]><xs:schema ${XS}/>` }, 'a.xsd');
+    expect(doc).toBeUndefined();
+    expect(problems.map((p) => p.code)).toEqual(['unsafe-input']);
+  });
+
+  it('limits the size of a file, of the schema set and the number of documents', () => {
+    const empty = `<xs:schema ${XS}/>`;
+    const padded = (size: number) => `<xs:schema ${XS}><!--${'x'.repeat(size)}--></xs:schema>`;
+    expect(load({ 'a.xsd': padded(3 * 1024 * 1024) }, 'a.xsd').problems.map((p) => p.code)).toEqual(['resource-limit']);
+    const includes = (names: string[]) =>
+      `<xs:schema ${XS}>${names.map((n) => `<xs:include schemaLocation="${n}"/>`).join('')}</xs:schema>`;
+    const parts = Array.from({ length: 9 }, (_, i) => `p${i}.xsd`);
+    const large = Object.fromEntries(parts.map((name) => [name, padded(2 * 1024 * 1024 - 100)]));
+    expect(load({ 'a.xsd': includes(parts), ...large }, 'a.xsd').problems.map((p) => p.code)).toContain(
+      'resource-limit',
+    );
+    const many = Array.from({ length: 128 }, (_, i) => `f${i}.xsd`);
+    const small = Object.fromEntries(many.map((name) => [name, empty]));
+    const { problems } = load({ 'a.xsd': includes(many), ...small }, 'a.xsd');
+    expect(problems.map((p) => p.code)).toEqual(['resource-limit']);
+  });
+
   it('resolves QNames with the namespaces in scope, including the default namespace', () => {
     const { set, doc, problems } = load(
       { 'a.xsd': `<xs:schema ${XS} xmlns="urn:d" xmlns:p="urn:p"><xs:element name="E" type="T"/></xs:schema>` },

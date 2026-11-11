@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { run, USAGE, type Io } from './cli.js';
 import type { JsonSchema } from './json-schema.js';
@@ -105,10 +106,65 @@ describe('convertFile and the command line', () => {
       expect.objectContaining({
         code: 'missing-file',
         message:
-          'schema document https://example.org/o.xsd could not be read: convertFile reads local files only; ' +
-          'pass a reader function to convert() to supply remote documents',
+          'schema document https://example.org/o.xsd could not be read: convertFile reads relative local paths ' +
+          'only; pass a reader function to convert() to supply other documents',
       }),
     ]);
+  });
+
+  describe('stays inside the base directory', () => {
+    let root: string;
+    const type = `<xs:schema ${XS}><xs:simpleType name="T"><xs:restriction base="xs:string"/></xs:simpleType></xs:schema>`;
+    const entryFor = (location: string) => {
+      const entry = join(root, 'inside', 'a.xsd');
+      writeFileSync(
+        entry,
+        `<xs:schema ${XS}><xs:include schemaLocation="${location}"/><xs:element name="R" type="T"/></xs:schema>`,
+      );
+      return entry;
+    };
+
+    beforeAll(() => {
+      root = mkdtempSync(join(tmpdir(), 'xsd-to-jsonschema-base-'));
+      mkdirSync(join(root, 'inside'));
+      mkdirSync(join(root, 'outside'));
+      writeFileSync(join(root, 'outside', 't.xsd'), type);
+      symlinkSync(join(root, 'outside', 't.xsd'), join(root, 'inside', 'link.xsd'));
+    });
+
+    afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+    it('refuses a relative path that leaves it', () => {
+      const { problems } = convertFile(entryFor('../outside/t.xsd'));
+      expect(problems[0]).toMatchObject({ code: 'missing-file' });
+      expect(problems[0]?.message).toContain('leaves the base directory');
+    });
+
+    it('refuses a file: URL and a symbolic link that leaves it', () => {
+      const url = pathToFileURL(join(root, 'outside', 't.xsd')).href;
+      expect(convertFile(entryFor(url)).problems[0]?.message).toContain('relative local paths only');
+      expect(convertFile(entryFor('link.xsd')).problems[0]?.message).toContain('symbolic link leaves');
+    });
+
+    it('reads sibling folders with a wider base directory', () => {
+      const entry = entryFor('../outside/t.xsd');
+      expect(convertFile(entry, { baseDirectory: root }).problems).toEqual([]);
+      const { out, io } = capture();
+      expect(run([entry, '--base-dir', root], io)).toBe(0);
+      expect(out.stderr).toBe('');
+    });
+
+    it('refuses an entry outside the base directory', () => {
+      const { schema, problems } = convertFile(entryFor('x.xsd'), { baseDirectory: join(root, 'outside') });
+      expect(schema).toBeUndefined();
+      expect(problems).toEqual([expect.objectContaining({ code: 'unsafe-input' })]);
+    });
+
+    it('refuses a file larger than 2 MiB before reading it', () => {
+      const big = join(root, 'inside', 'big.xsd');
+      writeFileSync(big, ' '.repeat(2 * 1024 * 1024 + 1));
+      expect(convertFile(big).problems[0]?.message).toContain('2 MiB');
+    });
   });
 
   it('exits with 2 and a message when the entry is a directory or the output cannot be written', () => {

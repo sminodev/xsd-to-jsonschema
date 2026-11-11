@@ -269,7 +269,7 @@ validation.
   "Level": 0,
   "DeliveryDate": "2026-11-20",
   "Wanted": "2026-11",
-  "Note": { "value": "Please ring <c:b>twice</c:b>." },
+  "Note": { "value": "Please ring <c:b xmlns:c=\"urn:example:common\">twice</c:b>." },
   "DiscountCode": "AUTUMN",
   "DiscountPercent": 10,
   "Contact": { "Name": "Paper Shop", "Email": "orders@example.com" },

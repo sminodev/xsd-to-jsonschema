@@ -6,6 +6,23 @@ function decimal(value: number): [bigint, number] {
   return scale >= 0 ? [digits, scale] : [digits * 10n ** BigInt(-scale), 0];
 }
 
+/** The digits and exponent of a decimal text, the same for every spelling of one value. */
+function canonicalDecimal(text: string): string {
+  const [, sign, whole = '', fraction = '', exponent = '0'] =
+    /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text) ?? [];
+  const raw = `${whole}${fraction}`.replace(/^0+/, '');
+  if (raw === '') {
+    return '0';
+  }
+  const digits = raw.replace(/0+$/, '');
+  return `${sign === '-' ? '-' : ''}${digits}e${Number(exponent) - fraction.length + raw.length - digits.length}`;
+}
+
+/** Whether a JSON number holds exactly the value of a decimal text. */
+export function isExact(text: string, value: number): boolean {
+  return canonicalDecimal(text) === canonicalDecimal(String(value));
+}
+
 export function isMultipleOf(value: number, step: number): boolean {
   if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0) {
     return false;

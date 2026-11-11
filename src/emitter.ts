@@ -4,7 +4,7 @@
 // docs/output.md describes the result.
 
 import type { Element } from '@xmldom/xmldom';
-import { addConstraints, ContentModel, emptyFragment, type Fragment, occurs, type Prop } from './content-model.js';
+import { ContentModel, emptyFragment, type Fragment, occurs, type Prop, writeObject } from './content-model.js';
 import { Definitions } from './definitions.js';
 import type { JsonSchema, XmlAnnotation } from './json-schema.js';
 import type { Problems } from './problems.js';
@@ -34,8 +34,9 @@ export interface EmitterOptions extends SimpleTypeOptions {
   textProperty: string;
 }
 
-/** A property from an attribute; `prohibited` attributes remove an inherited one. */
-type AttributeProp = { key: string; prohibited: true } | (Prop & { required: boolean; prohibited?: false });
+/** A property from an attribute, with its expanded name as `id`; `prohibited` attributes remove an inherited one. */
+type AttributeProp =
+  { id: string; key: string; prohibited: true } | (Prop & { id: string; required: boolean; prohibited?: false });
 
 interface ElementDeclaration {
   name: string;
@@ -53,6 +54,8 @@ export class Emitter {
   private rootId: string | undefined;
   /** the global elements that name a substitution group head, by the local name of the head; built on first use */
   private substitutionGroups: Map<string, { node: Element; head: string }[]> | undefined;
+  /** the named complex types derived directly from each named complex type; built on first use */
+  private derivations: Map<Element, { node: Element; method: string }[]> | undefined;
 
   constructor(
     private readonly set: SchemaSet,
@@ -60,7 +63,7 @@ export class Emitter {
     private readonly options: EmitterOptions,
   ) {
     this.simple = new SimpleTypes(set, problems, options);
-    this.contentModel = new ContentModel(set, problems, (node, doc) => this.elementProperty(node, doc));
+    this.contentModel = new ContentModel(set, problems, (node, doc) => this.elementProperty(node, doc), options.xml);
   }
 
   /** The schema of a global element: its content in place, with all definitions it reaches. */
@@ -74,8 +77,11 @@ export class Emitter {
       typeName !== undefined ? this.set.lookup('complexType', this.set.resolveQName(root.node, typeName)) : undefined;
     if (named) {
       this.checkElement(decl);
+      this.checkType(decl, named);
     }
-    const content = named ? this.complexType(named.node, named.doc) : this.declarationType(decl, true);
+    const content = named
+      ? this.withValues(this.complexType(named.node, named.doc), root.node, undefined, this.textType(named.node))
+      : this.declarationType(decl, true);
     const defs = this.definitions.buildAll();
     const schema: JsonSchema = { $schema: SCHEMA_2020_12 };
     const description = decl.docs || content.description;
@@ -174,13 +180,19 @@ export class Emitter {
     const anonymousSimple = xsChild(node, 'simpleType');
     let schema: JsonSchema;
     let valueType: SimpleTypeRef | undefined;
+    let textType: SimpleTypeRef | undefined;
     if (typeName !== undefined) {
       const name = this.set.resolveQName(node, typeName);
       schema = this.typeRef(name, node);
-      if (this.set.lookup('simpleType', name) || name.ns === XS) {
+      const complex = this.set.lookup('complexType', name);
+      if (complex) {
+        this.checkType(decl, complex);
+        textType = this.textType(complex.node);
+      } else if (this.set.lookup('simpleType', name) || name.ns === XS) {
         valueType = name;
       }
     } else if (anonymousComplex) {
+      textType = this.textType(anonymousComplex);
       const id = clark(decl.ns, decl.name);
       if (decl.global && !inline && id === this.rootId) {
         schema = { $ref: '#' };
@@ -194,8 +206,26 @@ export class Emitter {
       valueType = anonymousSimple;
     } else {
       schema = {};
+      valueType = { ns: XS, local: 'anySimpleType' };
     }
-    return this.withValues(schema, node, valueType);
+    return this.withValues(schema, node, valueType, textType);
+  }
+
+  /** The simple type of the text of a complex type with simple content; undefined for other complex types. */
+  private textType(node: Element, seen = new Set<Element>()): SimpleTypeRef | undefined {
+    const simpleContent = xsChild(node, 'simpleContent');
+    const derivation = simpleContent && xsChildren(simpleContent)[0];
+    if (!derivation || seen.has(node)) {
+      return undefined;
+    }
+    seen.add(node);
+    const inner = xsChild(derivation, 'simpleType');
+    if (inner) {
+      return inner;
+    }
+    const base = this.set.resolveQName(derivation, attr(derivation, 'base') ?? '');
+    const complex = base.ns === XS ? undefined : this.set.lookup('complexType', base);
+    return complex ? this.textType(complex.node, seen) : base;
   }
 
   /** Reports what an element declaration means in XML that its JSON property cannot express. */
@@ -233,6 +263,65 @@ export class Emitter {
     }
   }
 
+  /** Reports what the complex type of an element allows in XML that its JSON form cannot express. */
+  private checkType(decl: ElementDeclaration, type: Component): void {
+    const name = attr(type.node, 'name') ?? '';
+    if (isTrue(attr(type.node, 'abstract'))) {
+      this.problems.error(
+        'unsupported-element',
+        `${decl.name} has the abstract type ${name}; documents choose a derived type with xsi:type, which the schema does not accept`,
+        this.set.at(decl.node),
+      );
+      return;
+    }
+    const derived = this.substitutableTypes(decl, type);
+    if (derived.length > 0) {
+      this.problems.warning(
+        'unsupported-xsi-type',
+        `xsi:type can give an element of type ${name} the derived type ${derived.join(', ')}; the schema accepts only ${name}`,
+        this.set.at(type.node),
+      );
+    }
+  }
+
+  /** The names of the concrete types derived from the type of an element that xsi:type may select. */
+  private substitutableTypes(decl: ElementDeclaration, type: Component): string[] {
+    if (this.derivations === undefined) {
+      this.derivations = new Map();
+      for (const { node } of this.set.components.complexType.values()) {
+        const content = xsChild(node, 'complexContent') ?? xsChild(node, 'simpleContent');
+        const derivation = content && xsChildren(content)[0];
+        const base =
+          derivation &&
+          this.set.lookup('complexType', this.set.resolveQName(derivation, attr(derivation, 'base') ?? ''));
+        if (derivation && base) {
+          this.derivations.set(base.node, [
+            ...(this.derivations.get(base.node) ?? []),
+            { node, method: derivation.localName ?? '' },
+          ]);
+        }
+      }
+    }
+    // The element and its type can block derivation methods, in their own block attribute or the schema's blockDefault.
+    const blocked = new Set([...blockedBy(decl.node, decl.doc), ...blockedBy(type.node, type.doc)]);
+    const names: string[] = [];
+    const seen = new Set<Element>([type.node]);
+    const visit = (base: Element): void => {
+      for (const { node, method } of this.derivations?.get(base) ?? []) {
+        if (seen.has(node) || blocked.has(method)) {
+          continue;
+        }
+        seen.add(node);
+        if (!isTrue(attr(node, 'abstract'))) {
+          names.push(attr(node, 'name') ?? '');
+        }
+        visit(node);
+      }
+    };
+    visit(type.node);
+    return names;
+  }
+
   /** The names of the global elements that may stand in for a global element (its substitution group). */
   private substitutionMembers(decl: ElementDeclaration): string[] {
     if (this.substitutionGroups === undefined) {
@@ -250,13 +339,24 @@ export class Emitter {
       .map(({ node }) => attr(node, 'name') ?? '');
   }
 
-  private withValues(schema: JsonSchema, node: Element, valueType: SimpleTypeRef | undefined): JsonSchema {
+  /**
+   * Adds the fixed and default value of a declaration: to the schema, or to the text property for simple content.
+   *
+   * @param textType - the type of the text of simple content, if the declaration has no simple type
+   */
+  private withValues(
+    schema: JsonSchema,
+    node: Element,
+    valueType: SimpleTypeRef | undefined,
+    textType?: SimpleTypeRef,
+  ): JsonSchema {
     const fixed = attr(node, 'fixed');
     const fallback = attr(node, 'default');
     if (fixed === undefined && fallback === undefined) {
       return schema;
     }
-    if (valueType === undefined) {
+    const type = valueType ?? textType;
+    if (type === undefined) {
       this.problems.error(
         'unsupported-value',
         'fixed or default on an element with complex content is not supported',
@@ -264,8 +364,8 @@ export class Emitter {
       );
       return schema;
     }
-    const json = this.simple.jsonType(valueType, node);
-    const out: JsonSchema = { ...schema };
+    const json = this.simple.jsonType(type, node);
+    const values: JsonSchema = {};
     for (const [keyword, lexical] of [
       ['const', fixed],
       ['default', fallback],
@@ -277,10 +377,22 @@ export class Emitter {
       if ('error' in value) {
         this.problems.error('invalid-value', value.error, this.set.at(node));
       } else {
-        out[keyword] = value.value;
+        if (value.rounded) {
+          this.problems.warning('rounded-number', `${lexical} is rounded to ${String(value.value)}`, this.set.at(node));
+        }
+        values[keyword] = value.value;
       }
     }
-    return out;
+    if (valueType !== undefined) {
+      return { ...schema, ...values };
+    }
+    const key = this.options.textProperty;
+    const text = schema.properties?.[key];
+    return {
+      ...schema,
+      type: 'object',
+      properties: { ...schema.properties, [key]: { ...(typeof text === 'object' ? text : {}), ...values } },
+    };
   }
 
   /** The property of an element particle: content, description, `xml`, and an array for repetition. */
@@ -290,29 +402,32 @@ export class Emitter {
       return undefined;
     }
     const { min, max } = occurs(node);
-    let schema = this.declarationType(decl);
+    const item = this.declarationType(decl);
     const xml: XmlAnnotation | undefined = this.options.xml && decl.ns ? { namespace: decl.ns } : undefined;
-    if (max > 1) {
-      const array: JsonSchema = {};
+    const array = (low: number, high: number): JsonSchema => {
+      const list: JsonSchema = {};
       if (decl.docs) {
-        array.description = decl.docs;
+        list.description = decl.docs;
       }
-      array.type = 'array';
-      array.items = schema;
-      if (min > 0) {
-        array.minItems = min;
+      list.type = 'array';
+      list.items = item;
+      if (low > 0) {
+        list.minItems = low;
       }
-      if (max !== Infinity) {
-        array.maxItems = max;
+      if (high !== Infinity) {
+        list.maxItems = high;
       }
       if (xml) {
-        array.xml = xml;
+        list.xml = xml;
       }
-      schema = array;
-    } else {
-      schema = annotate(schema, decl.docs, xml);
-    }
-    return { key: decl.name, schema, node };
+      return list;
+    };
+    return {
+      key: decl.name,
+      schema: max > 1 ? array(min, max) : annotate(item, decl.docs, xml),
+      node,
+      occurrences: { identity: `{${decl.ns}}${JSON.stringify(item)}`, min, max, array },
+    };
   }
 
   private attributeProperty(node: Element, doc: SchemaDocument): AttributeProp | undefined {
@@ -338,9 +453,10 @@ export class Emitter {
       ns = qualified ? doc.targetNamespace : '';
     }
     const key = attr(decl, 'name') ?? '';
+    const id = clark(ns, key);
     const use = attr(node, 'use') ?? 'optional';
     if (use === 'prohibited') {
-      return { key, prohibited: true };
+      return { id, key, prohibited: true };
     }
     const typeName = attr(decl, 'type');
     const anonymous = xsChild(decl, 'simpleType');
@@ -363,7 +479,7 @@ export class Emitter {
       ? { ...(ns ? { namespace: ns } : {}), attribute: true }
       : undefined;
     const docs = documentation(node) || (decl !== node ? documentation(decl) : undefined);
-    return { key, schema: annotate(schema, docs, xml), node, required: use === 'required' };
+    return { id, key, schema: annotate(schema, docs, xml), node, required: use === 'required' };
   }
 
   /**
@@ -435,7 +551,7 @@ export class Emitter {
     if (derivation) {
       const baseQName = attr(derivation, 'base') ?? '';
       const baseName = this.set.resolveQName(derivation, baseQName);
-      const fragment = emptyFragment();
+      let fragment = emptyFragment();
       let attributes: AttributeProp[] = [];
       const base = this.set.lookup('complexType', baseName);
       if (!base && !(baseName.ns === XS && baseName.local === 'anyType')) {
@@ -443,6 +559,8 @@ export class Emitter {
       }
       if (base && derivation.localName === 'extension') {
         const inherited = this.content(base.node, base.doc, seen);
+        // The object continues the numbering of the repeated groups of its base.
+        fragment = emptyFragment(inherited.fragment.groupKeys);
         this.contentModel.merge(fragment, inherited.fragment, true);
         attributes = inherited.attributes;
       } else if (base) {
@@ -582,6 +700,14 @@ export class Emitter {
       if (attribute.prohibited) {
         continue;
       }
+      if (Object.hasOwn(properties, attribute.key)) {
+        this.problems.error(
+          'duplicate-name',
+          `${attribute.key} is the name of two attributes in different namespaces`,
+          this.set.at(attribute.node),
+        );
+        continue;
+      }
       properties[attribute.key] = attribute.schema;
       if (attribute.required) {
         required.push(attribute.key);
@@ -599,30 +725,26 @@ export class Emitter {
       properties[prop.key] = prop.schema;
     }
     required.push(...fragment.required.filter((key) => !required.includes(key)));
-    if (Object.keys(properties).length > 0) {
-      schema.properties = properties;
-    }
-    if (required.length > 0) {
-      schema.required = required;
-    }
-    if (!fragment.open) {
-      schema.additionalProperties = false;
-    }
-    if (Object.keys(fragment.dependentRequired).length > 0) {
-      schema.dependentRequired = fragment.dependentRequired;
-    }
-    addConstraints(schema, fragment.constraints);
+    writeObject(schema, properties, required, fragment);
     return schema;
   }
 }
 
+const isTrue = (value: string | undefined): boolean => value === 'true' || value === '1';
+
+/** The derivation methods a declaration blocks, from its block attribute or the blockDefault of its schema. */
+function blockedBy(node: Element, doc: SchemaDocument): string[] {
+  const value = attr(node, 'block') ?? attr(doc.root, 'blockDefault') ?? '';
+  return value.includes('#all') ? ['extension', 'restriction'] : value.split(/\s+/);
+}
+
 // Attributes of a restriction or extension replace those of the base with the same name.
 function overrideAttributes(base: AttributeProp[], own: AttributeProp[]): AttributeProp[] {
-  const byKey = new Map(base.map((a) => [a.key, a]));
+  const byId = new Map(base.map((a) => [a.id, a]));
   for (const attribute of own) {
-    byKey.set(attribute.key, attribute);
+    byId.set(attribute.id, attribute);
   }
-  return [...byKey.values()].filter((a) => !a.prohibited);
+  return [...byId.values()].filter((a) => !a.prohibited);
 }
 
 function annotate(schema: JsonSchema, description: string | undefined, xml: XmlAnnotation | undefined): JsonSchema {

@@ -249,7 +249,7 @@ export class SimpleTypes {
    */
   schema(type: SimpleTypeRef, from?: Element): JsonSchema {
     const derivation = this.derive(type, from);
-    const at = isElement(type) ? this.at(type) : undefined;
+    const at = this.at(isElement(type) ? type : (this.set.lookup('simpleType', type)?.node ?? from));
     if (derivation.missing) {
       const { name, from: namedAt } = derivation.missing;
       this.problems.error('unknown-type', `simple type {${name.ns}}${name.local} is not defined`, this.at(namedAt));
@@ -341,6 +341,13 @@ export class SimpleTypes {
               this.problems.error('invalid-facet', bound.error, facetAt);
               break;
             }
+            if (bound.rounded) {
+              this.problems.warning(
+                'rounded-number',
+                `${facet.localName} ${value} is rounded to ${String(bound.value)}`,
+                facetAt,
+              );
+            }
             const exclusive = facet.localName.endsWith('Exclusive');
             (facet.localName.startsWith('min') ? numeric.lower : numeric.upper).push({
               value: bound.value as number,
@@ -369,7 +376,7 @@ export class SimpleTypes {
         patternSteps.push(patterns);
       }
       if (values.length > 0) {
-        enumeration = values;
+        enumeration = this.withinBase(values, enumeration, json, step.node);
         enumAt = step.node;
       }
     }
@@ -456,7 +463,7 @@ export class SimpleTypes {
         patternSteps.push(patterns);
       }
       if (values.length > 0) {
-        enumeration = { values, at: step.node };
+        enumeration = { values: this.withinBase(values, enumeration?.values, schema.type, step.node), at: step.node };
       }
     }
     if (patternSteps.length > 0 && schema.type === 'string') {
@@ -469,6 +476,34 @@ export class SimpleTypes {
       );
     }
     return enumeration ? enumSchema(schema, enumeration.values, this.problems, this.at(enumeration.at)) : schema;
+  }
+
+  /** The values of a further enumeration its base enumeration allows; XML Schema forbids the others. */
+  private withinBase(
+    values: string[],
+    base: string[] | undefined,
+    json: JsonType | undefined,
+    node: Element,
+  ): string[] {
+    if (base === undefined) {
+      return values;
+    }
+    const valueOf = (lexical: string) => {
+      const converted = lexicalToJson(json, lexical);
+      return 'value' in converted ? converted.value : lexical;
+    };
+    const allowed = new Set(base.map(valueOf));
+    return values.filter((value) => {
+      if (!allowed.has(valueOf(value))) {
+        this.problems.error(
+          'invalid-facet',
+          `enumeration value ${value} is not in the base enumeration`,
+          this.at(node),
+        );
+        return false;
+      }
+      return true;
+    });
   }
 }
 

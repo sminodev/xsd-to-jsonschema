@@ -3,8 +3,10 @@ import type { Node } from '@xmldom/xmldom';
 /** Every code a problem can have. docs/output.md explains each one; a test keeps the two lists in step. */
 export const PROBLEM_CODES = [
   // the schema accepts some values the XML Schema rejects
+  'approximated-occurrences',
   'approximated-total-digits',
   'lexical-pattern',
+  'rounded-number',
   'unreachable-enumeration',
   'unsupported-any',
   'unsupported-bound',
@@ -12,15 +14,14 @@ export const PROBLEM_CODES = [
   'unsupported-length',
   'unsupported-mixed',
   'unsupported-union',
+  // XML documents the JSON form has no place for
+  'unsupported-xsi-type',
   // constructs JSON Schema can't express
-  'ambiguous-choice',
   'duplicate-name',
-  'repeated-group',
   'unsupported-element',
   'unsupported-facet',
   'unsupported-include',
   'unsupported-list',
-  'unsupported-optional-group',
   'unsupported-particle',
   'unsupported-redefine',
   'unsupported-simple-content',
@@ -40,9 +41,12 @@ export const PROBLEM_CODES = [
   // files and the root element
   'invalid-xml',
   'missing-file',
+  'namespace-mismatch',
   'not-a-schema',
+  'resource-limit',
   'root-required',
   'unknown-root',
+  'unsafe-input',
 ] as const;
 
 export type ProblemCode = (typeof PROBLEM_CODES)[number];

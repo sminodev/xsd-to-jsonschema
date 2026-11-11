@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { convert } from './convert.js';
+import type { JsonSchema } from './json-schema.js';
 import type { Problem } from './problems.js';
+import { ajvFor } from './test-support/oracle.js';
 
 const XS = 'xmlns:xs="http://www.w3.org/2001/XMLSchema"';
 
@@ -176,9 +178,6 @@ describe('convert', () => {
       expect(problemsOf(type('><xs:sequence><xs:any/></xs:sequence>'))).toEqual(['unsupported-any']);
       expect(problemsOf(type(' mixed="true"><xs:sequence/>'))).toEqual(['unsupported-mixed']);
       expect(
-        problemsOf(type('><xs:sequence maxOccurs="2"><xs:element name="B" type="xs:string"/></xs:sequence>')),
-      ).toEqual(['repeated-group']);
-      expect(
         problemsOf(
           '<xs:element name="A"><xs:simpleType><xs:restriction base="xs:string"><xs:pattern value="\\p{IsBasicLatin}"/></xs:restriction></xs:simpleType></xs:element>',
         ),
@@ -191,20 +190,150 @@ describe('convert', () => {
       expect(
         problemsOf(
           type(
-            '><xs:sequence><xs:element name="B" type="xs:string"/><xs:element name="B" type="xs:string"/></xs:sequence>',
+            '><xs:sequence><xs:element name="B" type="xs:string"/></xs:sequence><xs:attribute name="B" type="xs:string"/>',
           ),
         ),
       ).toEqual(['duplicate-name']);
       expect(
         problemsOf(
           type(
-            '><xs:choice><xs:element name="B" type="xs:string" minOccurs="0"/><xs:element name="C" type="xs:string" minOccurs="0"/></xs:choice>',
+            '><xs:sequence><xs:element name="B" type="xs:string"/><xs:element name="B" type="xs:integer"/></xs:sequence>',
           ),
         ),
-      ).toEqual(['ambiguous-choice']);
+      ).toEqual(['duplicate-name']);
       expect(problemsOf(type('><xs:complexContent><xs:restriction base="Missing"/></xs:complexContent>'))).toEqual([
         'unknown-type',
       ]);
+    });
+
+    it('and still write a schema a validator can compile', () => {
+      const schemas = [
+        type(
+          '><xs:sequence><xs:element name="B" type="xs:string"/><xs:element name="C" type="xs:string"/><xs:element name="B" type="xs:integer"/></xs:sequence>',
+        ),
+        type(
+          '><xs:sequence><xs:element name="B" type="xs:string"/></xs:sequence><xs:attribute name="B" type="xs:string" use="required"/>',
+        ),
+        type(
+          '><xs:choice><xs:sequence><xs:element name="B" type="xs:string"/><xs:element name="B" type="xs:integer"/></xs:sequence><xs:element name="C" type="xs:string"/></xs:choice>',
+        ),
+      ];
+      for (const body of schemas) {
+        const { schema: out, problems } = convert({ files: { 'a.xsd': schema(body) }, entry: 'a.xsd', root: 'A' });
+        expect(codes(problems)).toEqual(['duplicate-name']);
+        expect(() => ajvFor(out as JsonSchema)).not.toThrow();
+      }
+    });
+
+    it('for attributes of one local name in two namespaces, keeping the first', () => {
+      const { schema: out, problems } = convert({
+        files: {
+          'a.xsd': schema(
+            '<xs:attribute name="id" type="xs:integer"/>' +
+              '<xs:element name="A"><xs:complexType><xs:attribute ref="t:id" use="required"/>' +
+              '<xs:attribute name="id" type="xs:string" form="unqualified"/></xs:complexType></xs:element>',
+          ),
+        },
+        entry: 'a.xsd',
+        root: 'A',
+      });
+      expect(codes(problems)).toEqual(['duplicate-name']);
+      expect(out?.properties?.['id']).toMatchObject({ type: 'integer' });
+      expect(out?.required).toEqual(['id']);
+    });
+
+    it('keeps inherited attributes apart by namespace', () => {
+      const { schema: out, problems } = convert({
+        files: {
+          'a.xsd': schema(
+            '<xs:attribute name="id" type="xs:integer"/>' +
+              '<xs:complexType name="Base"><xs:attribute ref="t:id"/></xs:complexType>' +
+              '<xs:complexType name="Sub"><xs:complexContent><xs:extension base="Base">' +
+              '<xs:attribute name="id" type="xs:string" form="unqualified"/></xs:extension></xs:complexContent></xs:complexType>' +
+              '<xs:element name="A" type="Sub"/>',
+          ),
+        },
+        entry: 'a.xsd',
+        root: 'A',
+      });
+      expect(codes(problems)).toEqual(['duplicate-name']);
+      expect(out?.properties?.['id']).toMatchObject({ type: 'integer' });
+    });
+
+    it('for numbers a JSON number cannot hold exactly', () => {
+      const big = '9223372036854775807';
+      const restricted = (facets: string) =>
+        `<xs:element name="A"><xs:simpleType><xs:restriction base="xs:long">${facets}</xs:restriction></xs:simpleType></xs:element>`;
+      expect(problemsOf(restricted(`<xs:maxInclusive value="${big}"/>`))).toEqual(['rounded-number']);
+      expect(problemsOf(restricted(`<xs:enumeration value="${big}"/>`))).toEqual(['rounded-number']);
+      expect(problemsOf(`<xs:element name="A" type="xs:long" fixed="${big}"/>`)).toEqual(['rounded-number']);
+      expect(problemsOf(`<xs:element name="A" type="xs:decimal" fixed="12.50"/>`)).toEqual([]);
+      expect(problemsOf(restricted('<xs:maxInclusive value="9007199254740991"/>'))).toEqual([]);
+    });
+
+    it('for enumeration values outside the base enumeration', () => {
+      const body = (derived: string) =>
+        '<xs:simpleType name="Base"><xs:restriction base="xs:integer"><xs:enumeration value="1"/><xs:enumeration value="2"/></xs:restriction></xs:simpleType>' +
+        `<xs:element name="A"><xs:simpleType><xs:restriction base="Base">${derived}</xs:restriction></xs:simpleType></xs:element>`;
+      const run = (derived: string) =>
+        convert({ files: { 'a.xsd': schema(body(derived)) }, entry: 'a.xsd', root: 'A' });
+      const partly = run('<xs:enumeration value="01"/><xs:enumeration value="3"/>');
+      expect(codes(partly.problems)).toEqual(['invalid-facet']);
+      expect(partly.schema?.enum).toEqual([1]);
+      const none = run('<xs:enumeration value="3"/>');
+      expect(codes(none.problems)).toEqual(['invalid-facet']);
+      expect(none.schema?.not).toEqual({});
+      expect(() => ajvFor(none.schema as JsonSchema)).not.toThrow();
+    });
+
+    it('with the position of a named union member', () => {
+      const { problems } = convert({
+        files: {
+          'a.xsd': schema(
+            '<xs:simpleType name="L">\n<xs:list itemType="xs:string"/></xs:simpleType>\n' +
+              '<xs:simpleType name="U"><xs:union memberTypes="L xs:string"/></xs:simpleType><xs:element name="A" type="U"/>',
+          ),
+        },
+        entry: 'a.xsd',
+        root: 'A',
+      });
+      expect(problems).toEqual([expect.objectContaining({ code: 'unsupported-list', file: 'a.xsd', line: 1 })]);
+    });
+
+    it('for types that xsi:type can replace, unless a block attribute forbids it', () => {
+      const types =
+        '<xs:complexType name="Base"><xs:sequence><xs:element name="x" type="xs:string"/></xs:sequence></xs:complexType>' +
+        '<xs:complexType name="Wide"><xs:complexContent><xs:extension base="Base"><xs:sequence>' +
+        '<xs:element name="y" type="xs:string"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>' +
+        '<xs:complexType name="Wider"><xs:complexContent><xs:extension base="Wide"/></xs:complexContent></xs:complexType>';
+      const run = (element: string, extra = '') =>
+        convert({
+          files: { 'a.xsd': schema(`${types}${element}`).replace('<xs:schema ', `<xs:schema ${extra} `) },
+          entry: 'a.xsd',
+          root: 'A',
+        });
+      const open = run('<xs:element name="A" type="Base"/>');
+      expect(codes(open.problems)).toEqual(['unsupported-xsi-type']);
+      expect(open.problems[0]?.message).toContain('Wide, Wider');
+      expect(run('<xs:element name="A" type="Base" block="extension"/>').problems).toEqual([]);
+      expect(run('<xs:element name="A" type="Base"/>', 'blockDefault="#all"').problems).toEqual([]);
+      expect(codes(run('<xs:element name="A" type="Wide"/>').problems)).toEqual(['unsupported-xsi-type']);
+      expect(run('<xs:element name="A" type="Wider"/>').problems).toEqual([]);
+    });
+
+    it('for an element of an abstract type', () => {
+      const { problems } = convert({
+        files: {
+          'a.xsd': schema(
+            '<xs:complexType name="Shape" abstract="true"><xs:sequence><xs:element name="id" type="xs:string"/></xs:sequence></xs:complexType>' +
+              '<xs:element name="A"><xs:complexType><xs:sequence><xs:element name="S" type="Shape"/></xs:sequence></xs:complexType></xs:element>',
+          ),
+        },
+        entry: 'a.xsd',
+        root: 'A',
+      });
+      expect(codes(problems)).toEqual(['unsupported-element']);
+      expect(problems[0]?.message).toContain('abstract type Shape');
     });
 
     it('for facet values that are no counts, leaving the facet out', () => {

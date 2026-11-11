@@ -20,6 +20,10 @@ export interface QName {
   local: string;
 }
 
+export const MAX_DOCUMENTS = 128;
+export const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_SET_BYTES = 16 * 1024 * 1024;
+
 /** A global component and the document that declares it. */
 export interface Component {
   node: Element;
@@ -139,6 +143,7 @@ export class SchemaDocument {
  * components by expanded name.
  */
 export class SchemaSet {
+  private loadedBytes = 0;
   /** null while a document is being loaded or if it could not be loaded */
   readonly documents = new Map<string, SchemaDocument | null>();
   /** the document of each loaded root element, to find the file of a node */
@@ -157,7 +162,8 @@ export class SchemaSet {
     source: SchemaSource,
     private readonly problems: Problems,
   ) {
-    this.read = typeof source === 'function' ? source : (path) => source[path];
+    this.read =
+      typeof source === 'function' ? source : (path) => (Object.hasOwn(source, path) ? source[path] : undefined);
   }
 
   /** Loads a document and everything it imports or includes. */
@@ -165,6 +171,10 @@ export class SchemaSet {
     path = normalizePath(path);
     if (this.documents.has(path)) {
       return this.documents.get(path) ?? undefined;
+    }
+    if (this.documents.size >= MAX_DOCUMENTS) {
+      this.problems.error('resource-limit', `schema set exceeds ${MAX_DOCUMENTS} documents`, from);
+      return undefined;
     }
     this.documents.set(path, null);
     const at = { ...from, file: from?.file ?? path };
@@ -179,6 +189,17 @@ export class SchemaSet {
       this.problems.error('missing-file', `schema document ${path} not found`, at);
       return undefined;
     }
+    text = String(text);
+    const bytes = new TextEncoder().encode(text).length;
+    this.loadedBytes += bytes;
+    if (bytes > MAX_FILE_BYTES || this.loadedBytes > MAX_SET_BYTES) {
+      this.problems.error('resource-limit', 'schema input exceeds the 2 MiB file or 16 MiB set limit', { file: path });
+      return undefined;
+    }
+    if (/<!DOCTYPE\b/i.test(text)) {
+      this.problems.error('unsafe-input', 'DOCTYPE declarations are not accepted in schema input', { file: path });
+      return undefined;
+    }
     let root: Element | null;
     try {
       const xml = new DOMParser({
@@ -187,7 +208,7 @@ export class SchemaSet {
             throw new Error(message);
           }
         },
-      }).parseFromString(String(text).replace(/^[\uFEFF\s]+/, ''), 'text/xml');
+      }).parseFromString(text.replace(/^[\uFEFF\s]+/, ''), 'text/xml');
       root = xml.documentElement;
     } catch (e) {
       this.problems.error('invalid-xml', `${path}: ${messageOf(e)}`, { file: path });
@@ -226,6 +247,9 @@ export class SchemaSet {
           continue;
         }
         const target = this.load(resolvePath(path, location), at);
+        if (target && child.localName === 'import' && (attr(child, 'namespace') ?? '') !== target.targetNamespace) {
+          this.problems.error('namespace-mismatch', `import namespace does not match ${target.path}`, at);
+        }
         if (target && child.localName === 'include' && target.targetNamespace !== doc.targetNamespace) {
           this.problems.error(
             'unsupported-include',
