@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- xsi:nil on a simple type, a complex type with an attribute, simple content with an attribute, and a repeated element. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:v:nil" targetNamespace="urn:v:nil" elementFormDefault="qualified">
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="D" type="xs:date" nillable="true"/>
+        <xs:element name="A" nillable="true">
+          <xs:complexType>
+            <xs:sequence><xs:element name="Place" type="xs:string"/></xs:sequence>
+            <xs:attribute name="kind" type="xs:string" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="B" nillable="true">
+          <xs:complexType><xs:simpleContent><xs:extension base="xs:decimal"><xs:attribute name="w" type="xs:string"/></xs:extension></xs:simpleContent></xs:complexType>
+        </xs:element>
+        <xs:element name="K" nillable="true" minOccurs="0">
+          <xs:complexType><xs:sequence><xs:element name="X" type="xs:int"/></xs:sequence></xs:complexType>
+        </xs:element>
+        <xs:element name="L" type="xs:int" nillable="true" maxOccurs="3"/>
+        <xs:element name="N" type="xs:int" nillable="true"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

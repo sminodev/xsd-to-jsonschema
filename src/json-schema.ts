@@ -12,9 +12,23 @@ export interface XmlAnnotation {
   mixed?: boolean;
   /** the property holds a repeated model group: an array with an object per occurrence */
   group?: boolean;
+  /** how XML normalizes the whitespace of this string value before it is checked; absent for `preserve` */
+  whiteSpace?: 'replace' | 'collapse';
+  /** the array holds the items of an xs:list, not repeated elements */
+  list?: boolean;
+  /** the element is nillable: the property also allows its nil form */
+  nillable?: boolean;
+  /** xs:any: other child elements are written without a schema */
+  anyElement?: boolean;
+  /** xs:anyAttribute: other attributes are written as strings */
+  anyAttribute?: boolean;
+  /** the `#type` property: the type that xsi:type selects, as `{namespace}local` */
+  xsiType?: boolean;
+  /** the declared simple type of an element value, as `{namespace}local`: the only type xsi:type may name there */
+  type?: string;
 }
 
-export type JsonType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array';
+export type JsonType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array' | 'null';
 
 /** The subset of JSON Schema 2020-12 the converter writes. */
 export interface JsonSchema {

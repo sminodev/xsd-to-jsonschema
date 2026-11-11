@@ -30,8 +30,13 @@ describe('SimpleTypes', () => {
     expect(t.builtin('boolean')).toEqual({ type: 'boolean' });
     expect(t.builtin('decimal')).toEqual({ type: 'number' });
     expect(t.builtin('unsignedByte')).toEqual({ type: 'integer', minimum: 0, maximum: 255 });
-    expect(t.builtin('base64Binary')).toEqual({ type: 'string', contentEncoding: 'base64' });
-    expect(t.builtin('date')).toEqual({ type: 'string', format: 'date' });
+    expect(t.builtin('base64Binary')).toEqual({
+      type: 'string',
+      contentEncoding: 'base64',
+      pattern: expect.any(String) as string,
+      xml: { whiteSpace: 'collapse' },
+    });
+    expect(t.builtin('date')).toEqual({ type: 'string', format: 'date', xml: { whiteSpace: 'collapse' } });
   });
 
   it('writes dates as XML Schema patterns on request', () => {
@@ -182,34 +187,41 @@ describe('SimpleTypes', () => {
   it('reports what JSON Schema cannot express', () => {
     const t = types(
       '<xs:simpleType name="L"><xs:list itemType="xs:integer"/></xs:simpleType>' +
-        '<xs:simpleType name="U"><xs:union memberTypes="xs:integer xs:date"/></xs:simpleType>' +
+        '<xs:simpleType name="U"><xs:union memberTypes="xs:int xs:date"/></xs:simpleType>' +
         restriction('Digits', 'xs:integer', '<xs:pattern value="\\d{4}"/>') +
         restriction('After', 'xs:date', '<xs:minInclusive value="2000-01-01"/>'),
     );
-    expect(t.schema('L')).toEqual({ type: 'string' });
-    expect(t.schema('U')).toEqual({ type: 'string' });
+    expect(t.schema('L')).toEqual({ type: 'array', items: { type: 'integer' }, xml: { list: true } });
+    // The members are checked as text; the range of xs:int is not.
+    expect(t.schema('U')).toEqual({
+      type: 'string',
+      anyOf: [
+        { type: 'string', pattern: '^(?:[+\\-]?[0-9]+)$', xml: { whiteSpace: 'collapse' } },
+        { type: 'string', format: 'date', xml: { whiteSpace: 'collapse' } },
+      ],
+      xml: { whiteSpace: 'collapse' },
+    });
     expect(t.schema('Digits')).toEqual({ type: 'integer' });
-    expect(t.schema('After')).toEqual({ type: 'string', format: 'date' });
+    expect(t.schema('After')).toEqual({ type: 'string', format: 'date', xml: { whiteSpace: 'collapse' } });
     expect(t.schema('Missing')).toEqual({});
-    expect(t.codes()).toEqual([
-      'unsupported-list',
-      'unsupported-union',
-      'lexical-pattern',
-      'unsupported-bound',
-      'unknown-type',
-    ]);
+    expect(t.codes()).toEqual(['unsupported-union', 'lexical-pattern', 'unsupported-bound', 'unknown-type']);
   });
 
-  it('counts the length of hexBinary in octets and leaves out lengths in base64 octets or list items', () => {
+  it('counts the length of hexBinary in octets, of lists in items, and leaves out lengths in base64 octets', () => {
     const t = types(
       restriction('Hash', 'xs:hexBinary', '<xs:length value="20"/>') +
         restriction('Blob', 'xs:base64Binary', '<xs:maxLength value="1024"/>') +
         restriction('Tokens', 'xs:NMTOKENS', '<xs:maxLength value="3"/>'),
     );
     expect(t.schema('Hash')).toMatchObject({ minLength: 40, maxLength: 40 });
-    expect(t.schema('Blob')).toEqual({ type: 'string', contentEncoding: 'base64' });
-    expect(t.schema('Tokens')).not.toHaveProperty('maxLength');
-    expect(t.codes()).toEqual(['unsupported-length', 'unsupported-length']);
+    expect(t.schema('Blob')).toEqual({
+      type: 'string',
+      contentEncoding: 'base64',
+      pattern: expect.any(String) as string,
+      xml: { whiteSpace: 'collapse' },
+    });
+    expect(t.schema('Tokens')).toMatchObject({ type: 'array', minItems: 1, maxItems: 3 });
+    expect(t.codes()).toEqual(['unsupported-length']);
   });
 });
 

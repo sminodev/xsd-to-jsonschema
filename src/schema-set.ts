@@ -127,12 +127,18 @@ export class SchemaDocument {
   readonly targetNamespace: string;
   readonly elementQualified: boolean;
   readonly attributeQualified: boolean;
+  /** a document without target namespace, included into the namespace it now has (chameleon include) */
+  readonly chameleon: boolean;
 
+  /** @param includedInto - the target namespace a document without one takes from the document that includes it */
   constructor(
     readonly path: string,
     readonly root: Element,
+    includedInto?: string,
   ) {
-    this.targetNamespace = attr(root, 'targetNamespace') ?? '';
+    const own = attr(root, 'targetNamespace') ?? '';
+    this.chameleon = own === '' && includedInto !== undefined && includedInto !== '';
+    this.targetNamespace = this.chameleon ? (includedInto ?? '') : own;
     this.elementQualified = attr(root, 'elementFormDefault') === 'qualified';
     this.attributeQualified = attr(root, 'attributeFormDefault') === 'qualified';
   }
@@ -144,7 +150,10 @@ export class SchemaDocument {
  */
 export class SchemaSet {
   private loadedBytes = 0;
-  /** null while a document is being loaded or if it could not be loaded */
+  /**
+   * By path, or by path and namespace for a document included into a namespace it doesn't declare (see `load`); null
+   * while a document is being read or if it could not be loaded
+   */
   readonly documents = new Map<string, SchemaDocument | null>();
   /** the document of each loaded root element, to find the file of a node */
   private readonly byRoot = new Map<Element, SchemaDocument>();
@@ -166,17 +175,46 @@ export class SchemaSet {
       typeof source === 'function' ? source : (path) => (Object.hasOwn(source, path) ? source[path] : undefined);
   }
 
-  /** Loads a document and everything it imports or includes. */
-  load(path: string, from?: At): SchemaDocument | undefined {
+  /**
+   * Loads a document and everything it imports or includes.
+   *
+   * A document without target namespace that a document with one includes takes that namespace (chameleon include):
+   * it is loaded once more for each such namespace, as a document of its own, and its components belong to that
+   * namespace. References in it that resolve to no namespace refer to its components in that namespace.
+   *
+   * @param includedInto - the target namespace of the including document, for an xs:include
+   */
+  load(path: string, from?: At, includedInto?: string): SchemaDocument | undefined {
     path = normalizePath(path);
-    if (this.documents.has(path)) {
-      return this.documents.get(path) ?? undefined;
+    const known = this.documents.get(path);
+    const chameleonKey = `${path}\n${includedInto ?? ''}`;
+    if (includedInto && known?.targetNamespace === '') {
+      // Already loaded without a namespace: load it again into the namespace of the including document.
+      return this.documents.has(chameleonKey)
+        ? (this.documents.get(chameleonKey) ?? undefined)
+        : this.loadAs(chameleonKey, path, from, includedInto);
     }
+    if (this.documents.has(path)) {
+      return known ?? undefined;
+    }
+    if (includedInto && this.documents.has(chameleonKey)) {
+      return this.documents.get(chameleonKey) ?? undefined;
+    }
+    return this.loadAs(path, path, from, includedInto);
+  }
+
+  /** Reads and parses a document, registers its components and loads what it imports or includes. */
+  private loadAs(
+    key: string,
+    path: string,
+    from: At | undefined,
+    includedInto: string | undefined,
+  ): SchemaDocument | undefined {
     if (this.documents.size >= MAX_DOCUMENTS) {
       this.problems.error('resource-limit', `schema set exceeds ${MAX_DOCUMENTS} documents`, from);
       return undefined;
     }
-    this.documents.set(path, null);
+    this.documents.set(key, null);
     const at = { ...from, file: from?.file ?? path };
     let text: string | undefined;
     try {
@@ -218,8 +256,15 @@ export class SchemaSet {
       this.problems.error('not-a-schema', `${path} is no XML Schema document`, { file: path });
       return undefined;
     }
-    const doc = new SchemaDocument(path, root);
-    this.documents.set(path, doc);
+    let doc = new SchemaDocument(path, root, includedInto);
+    if (doc.chameleon && key === path) {
+      // A document without namespace, first reached through an include: keep it by path and namespace.
+      this.documents.delete(path);
+      key = `${path}\n${doc.targetNamespace}`;
+    } else if (!doc.chameleon && key !== path) {
+      doc = new SchemaDocument(path, root);
+    }
+    this.documents.set(key, doc);
     this.byRoot.set(root, doc);
     for (const child of xsChildren(root)) {
       const at = { file: path, node: child };
@@ -246,14 +291,15 @@ export class SchemaSet {
           }
           continue;
         }
-        const target = this.load(resolvePath(path, location), at);
+        const include = child.localName === 'include';
+        const target = this.load(resolvePath(path, location), at, include ? doc.targetNamespace : undefined);
         if (target && child.localName === 'import' && (attr(child, 'namespace') ?? '') !== target.targetNamespace) {
           this.problems.error('namespace-mismatch', `import namespace does not match ${target.path}`, at);
         }
-        if (target && child.localName === 'include' && target.targetNamespace !== doc.targetNamespace) {
+        if (target && include && target.targetNamespace !== doc.targetNamespace) {
           this.problems.error(
             'unsupported-include',
-            `${target.path} is included into another target namespace (chameleon include)`,
+            `${target.path} has the target namespace ${target.targetNamespace || '(none)'}, not that of the including document`,
             at,
           );
         }
@@ -278,6 +324,13 @@ export class SchemaSet {
     if (prefix !== null && !ns) {
       this.problems.error('unknown-prefix', `prefix ${prefix} of ${qname} is not declared`, this.at(node));
     }
+    // In a chameleon document, a name without namespace means a component of the namespace it was included into.
+    if (!ns && prefix === null) {
+      const doc = this.documentOf(node);
+      if (doc?.chameleon) {
+        return { ns: doc.targetNamespace, local };
+      }
+    }
     return { ns: ns || '', local };
   }
 
@@ -292,7 +345,12 @@ export class SchemaSet {
 
   /** The path of the document a node belongs to. */
   pathOf(node: Node): string | undefined {
+    return this.documentOf(node)?.path;
+  }
+
+  /** The schema document a node belongs to. */
+  documentOf(node: Node): SchemaDocument | undefined {
     const root = node.ownerDocument?.documentElement;
-    return root ? this.byRoot.get(root)?.path : undefined;
+    return root ? this.byRoot.get(root) : undefined;
   }
 }

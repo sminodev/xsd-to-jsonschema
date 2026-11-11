@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Substitution group with an abstract head, abstract type with xsi:type, concrete type with optional xsi:type,
+     xsi:type on simple content. On an element of a simple type, xsi:type may only name the declared type itself (a
+     redundant, ordinary value); any other type is a mapping error. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:v:sub" targetNamespace="urn:v:sub" elementFormDefault="qualified">
+  <xs:complexType name="DocType"><xs:sequence><xs:element name="Number" type="xs:string"/></xs:sequence></xs:complexType>
+  <xs:element name="Document" type="DocType" abstract="true"/>
+  <xs:element name="Invoice" substitutionGroup="Document">
+    <xs:complexType><xs:complexContent><xs:extension base="DocType"><xs:sequence><xs:element name="Amount" type="xs:decimal"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>
+  </xs:element>
+  <xs:element name="Credit" type="DocType" substitutionGroup="Document"/>
+  <xs:complexType name="Vehicle" abstract="true"><xs:sequence><xs:element name="Plate" type="xs:string"/></xs:sequence></xs:complexType>
+  <xs:complexType name="Car"><xs:complexContent><xs:extension base="Vehicle"><xs:sequence><xs:element name="Seats" type="xs:int"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>
+  <xs:complexType name="Animal"><xs:sequence><xs:element name="Name" type="xs:string"/></xs:sequence></xs:complexType>
+  <xs:complexType name="Dog"><xs:complexContent><xs:extension base="Animal"><xs:sequence><xs:element name="Breed" type="xs:string" minOccurs="0"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>
+  <xs:complexType name="Amount"><xs:simpleContent><xs:extension base="xs:decimal"><xs:attribute name="currency" type="xs:string" use="required"/></xs:extension></xs:simpleContent></xs:complexType>
+  <xs:complexType name="EuroAmount"><xs:simpleContent><xs:extension base="Amount"><xs:attribute name="source" type="xs:string"/></xs:extension></xs:simpleContent></xs:complexType>
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="Document" maxOccurs="2"/>
+        <xs:element name="Vehicle" type="Vehicle"/>
+        <xs:element name="Pet" type="Animal" maxOccurs="2"/>
+        <xs:element name="Count" type="xs:decimal"/>
+        <xs:element name="Price" type="Amount" minOccurs="0"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

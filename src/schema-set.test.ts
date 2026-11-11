@@ -79,14 +79,14 @@ describe('SchemaSet', () => {
     expect(problems[0]).toMatchObject({ file: 'a.xsd', line: 2, message: 'schema document gone.xsd not found' });
   });
 
-  it('reports an include into another target namespace and xs:redefine, which it does not apply', () => {
+  it('reports an include of another target namespace and xs:redefine, which it does not apply', () => {
     const { problems } = load(
       {
         'a.xsd': `<xs:schema ${XS} targetNamespace="urn:a">
-          <xs:include schemaLocation="plain.xsd"/>
-          <xs:redefine schemaLocation="plain.xsd"/>
+          <xs:include schemaLocation="b.xsd"/>
+          <xs:redefine schemaLocation="b.xsd"/>
         </xs:schema>`,
-        'plain.xsd': `<xs:schema ${XS}><xs:simpleType name="T"/></xs:schema>`,
+        'b.xsd': `<xs:schema ${XS} targetNamespace="urn:b"><xs:simpleType name="T"/></xs:schema>`,
       },
       'a.xsd',
     );
@@ -94,6 +94,38 @@ describe('SchemaSet', () => {
       expect.objectContaining({ code: 'unsupported-include', line: 2 }),
       expect.objectContaining({ code: 'unsupported-redefine', line: 3 }),
     ]);
+  });
+
+  it('includes a document without target namespace into the namespace of each including document', () => {
+    const { set, problems } = load(
+      {
+        'a.xsd': `<xs:schema ${XS} targetNamespace="urn:a">
+          <xs:import namespace="urn:b" schemaLocation="b.xsd"/>
+          <xs:import schemaLocation="common/c.xsd"/>
+          <xs:include schemaLocation="common/c.xsd"/>
+        </xs:schema>`,
+        'b.xsd': `<xs:schema ${XS} targetNamespace="urn:b"><xs:include schemaLocation="common/c.xsd"/></xs:schema>`,
+        'common/c.xsd': `<xs:schema ${XS}>
+          <xs:include schemaLocation="d.xsd"/>
+          <xs:complexType name="Contact"><xs:sequence><xs:element name="Phone" type="Digits"/></xs:sequence></xs:complexType>
+        </xs:schema>`,
+        'common/d.xsd': `<xs:schema ${XS}>
+          <xs:include schemaLocation="c.xsd"/>
+          <xs:simpleType name="Digits"><xs:restriction base="xs:string"/></xs:simpleType>
+        </xs:schema>`,
+      },
+      'a.xsd',
+    );
+    expect(problems).toEqual([]);
+    expect([...set.components.complexType.keys()].sort()).toEqual(['{urn:a}Contact', '{urn:b}Contact', '{}Contact']);
+    expect([...set.components.simpleType.keys()].sort()).toEqual(['{urn:a}Digits', '{urn:b}Digits', '{}Digits']);
+    // A reference without prefix in a chameleon document means its own namespace.
+    for (const ns of ['urn:a', 'urn:b', '']) {
+      const contact = set.components.complexType.get(`{${ns}}Contact`)?.node;
+      const phone = contact && xsChild(xsChild(contact, 'sequence') ?? contact, 'element');
+      expect(phone && set.resolveQName(phone, 'Digits')).toEqual({ ns, local: 'Digits' });
+      expect(phone && set.documentOf(phone)?.chameleon).toBe(ns !== '');
+    }
   });
 
   it('does not take inherited members of the files object for documents', () => {

@@ -32,7 +32,7 @@ describe('convertFile and the command line', () => {
       `<xs:schema ${XS} xmlns:o="urn:o" targetNamespace="urn:t">
         <xs:import namespace="urn:o" schemaLocation="types/o.xsd"/>
         <xs:element name="A" type="o:Code"/>
-        <xs:element name="B"><xs:simpleType><xs:list itemType="xs:string"/></xs:simpleType></xs:element>
+        <xs:element name="B"><xs:complexType><xs:sequence><xs:element ref="Missing"/></xs:sequence></xs:complexType></xs:element>
       </xs:schema>`,
     );
     writeFileSync(
@@ -46,7 +46,11 @@ describe('convertFile and the command line', () => {
   it('reads imports relative to the entry file', () => {
     const { schema, problems } = convertFile(main, { root: 'A' });
     expect(problems).toEqual([]);
-    expect(schema?.$defs?.['Code']).toEqual({ type: 'string', maxLength: 3 });
+    expect(schema?.$defs?.['Code']).toEqual({
+      type: 'string',
+      maxLength: 3,
+      xml: { whiteSpace: 'collapse', type: '{urn:o}Code' },
+    });
   });
 
   it('writes the schema to stdout and the problems to stderr', () => {
@@ -63,7 +67,7 @@ describe('convertFile and the command line', () => {
 
     const strict = capture();
     expect(run([main, '--root', 'B', '--strict'], strict.io)).toBe(1);
-    expect(strict.out.stderr).toContain('error unsupported-list');
+    expect(strict.out.stderr).toContain('error unknown-element');
 
     const noRoot = capture();
     expect(run([main], noRoot.io)).toBe(2);

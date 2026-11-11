@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Union of members with different whiteSpace; a root of type xs:token. Two roots: R and Code. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:simpleType name="Empty"><xs:restriction base="xs:string"><xs:maxLength value="0"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="DateOrEmpty"><xs:union memberTypes="xs:date Empty"/></xs:simpleType>
+  <xs:simpleType name="TokenOrText"><xs:union memberTypes="xs:token xs:string"/></xs:simpleType>
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="T" type="DateOrEmpty" maxOccurs="2"/>
+        <xs:element name="U" type="TokenOrText"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="Code"><xs:simpleType><xs:restriction base="xs:token"><xs:length value="3"/></xs:restriction></xs:simpleType></xs:element>
+</xs:schema>

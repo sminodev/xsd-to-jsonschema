@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Lists as typed arrays: element, attribute, repeated, empty, built-in list type, length facets, enumeration. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:v:list" targetNamespace="urn:v:list" elementFormDefault="qualified">
+  <xs:simpleType name="IntList"><xs:list itemType="xs:integer"/></xs:simpleType>
+  <xs:simpleType name="Color"><xs:restriction base="xs:token"><xs:enumeration value="red"/><xs:enumeration value="green"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="ColorList"><xs:list itemType="Color"/></xs:simpleType>
+  <xs:simpleType name="ShortList"><xs:restriction base="IntList"><xs:minLength value="1"/><xs:maxLength value="3"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="Pair"><xs:restriction base="IntList"><xs:enumeration value="1 2"/><xs:enumeration value="3 4"/></xs:restriction></xs:simpleType>
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Numbers" type="IntList"/>
+        <xs:element name="Short" type="ShortList"/>
+        <xs:element name="Repeated" type="IntList" maxOccurs="2"/>
+        <xs:element name="Empty" type="IntList"/>
+        <xs:element name="Tokens" type="xs:NMTOKENS"/>
+        <xs:element name="Refs" type="xs:IDREFS" minOccurs="0"/>
+        <xs:element name="Pick" type="Pair"/>
+        <xs:element name="Entry" minOccurs="0" maxOccurs="2"><xs:complexType><xs:attribute name="id" type="xs:ID" use="required"/></xs:complexType></xs:element>
+      </xs:sequence>
+      <xs:attribute name="codes" type="ColorList"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

@@ -34,7 +34,8 @@ export function lexicalToJson(
   return { value: lexical };
 }
 
-function violation(schema: JsonSchema, value: unknown): string | undefined {
+/** Why a value breaks the simple constraints of a schema, or undefined if it meets them. */
+export function violation(schema: JsonSchema, value: unknown): string | undefined {
   const type = schema.type;
   if (
     (type === 'integer' && (typeof value !== 'number' || !Number.isInteger(value))) ||

@@ -24,6 +24,22 @@ describe('XML Schema patterns', () => {
     expect(anchored('[a\\-z]').test('b')).toBe(false);
   });
 
+  it('give \\i and \\c the name characters of XML 1.0, Second Edition', () => {
+    const start = anchored('\\i');
+    const char = anchored('\\c');
+    for (const c of ['a', 'Z', '_', ':', 'é', 'ω', 'я', '中']) {
+      expect(start.test(c), c).toBe(true);
+    }
+    // Digits, combining marks and extenders follow a name start; ARABIC-INDIC DIGIT ONE is one of them.
+    for (const c of ['1', '-', '.', '\u0661', '\u0301', '\u00B7']) {
+      expect([start.test(c), char.test(c)], c).toEqual([false, true]);
+    }
+    // Later editions added titlecase letters, letter numbers and characters beyond the BMP.
+    for (const c of ['\u01C5', '\u216B', '\u{10000}', '\u2070', '\uFDF0']) {
+      expect([start.test(c), char.test(c)], c).toEqual([false, false]);
+    }
+  });
+
   it('give the multi-character escapes their XML Schema meaning', () => {
     expect(anchored('\\d').test('٣')).toBe(true); // ARABIC-INDIC DIGIT THREE is \p{Nd}
     expect(anchored('\\s').test('\u00a0')).toBe(false); // \s is only space, tab, CR and LF

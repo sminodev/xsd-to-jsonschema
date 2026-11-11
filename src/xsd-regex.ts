@@ -5,19 +5,17 @@
 // - An XML Schema pattern matches the whole value, so the result is anchored with ^(?:...)$.
 // - ^ and $ are ordinary characters in XML Schema.
 // - . excludes only \n and \r; \d is \p{Nd}; \s is [ \t\n\r]; \w is [^\p{P}\p{Z}\p{C}]; \i and \c are the XML name
-//   characters.
+//   characters of XML 1.0, Second Edition, which XML Schema 1.0 refers to (name-chars.ts).
 // - \- outside a class is a plain hyphen (an identity escape the `u` flag rejects).
 // - Class subtraction [a-z-[aeiou]] becomes a negative lookahead.
 // Block escapes (\p{IsBasicLatin}) have no JavaScript equivalent and are reported as untranslatable.
+
+import { NAME_CHAR, NAME_START } from './name-chars.js';
 
 export class XsdRegexError extends Error {
   override name = 'XsdRegexError';
 }
 
-const NAME_START =
-  ':A-Z_a-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D' +
-  '\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}';
-const NAME_CHAR = NAME_START + '\\-.0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040';
 const SPACE = ' \\t\\n\\r';
 const NOT_WORD = '\\p{P}\\p{Z}\\p{C}';
 

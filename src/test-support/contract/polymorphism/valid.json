@@ -1,0 +1,35 @@
+{
+  "Invoice": [
+    {
+      "Number": "1",
+      "Amount": 9.5
+    }
+  ],
+  "Credit": [
+    {
+      "Number": "2"
+    }
+  ],
+  "Vehicle": {
+    "#type": "{urn:v:sub}Car",
+    "Plate": "K",
+    "Seats": 4
+  },
+  "Pet": [
+    {
+      "Name": "a"
+    },
+    {
+      "#type": "{urn:v:sub}Dog",
+      "Name": "b",
+      "Breed": "c"
+    }
+  ],
+  "Count": 5,
+  "Price": {
+    "#type": "{urn:v:sub}EuroAmount",
+    "currency": "EUR",
+    "source": "x",
+    "value": 4.99
+  }
+}

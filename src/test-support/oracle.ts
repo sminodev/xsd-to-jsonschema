@@ -77,8 +77,16 @@ export async function compare(input: {
     const xsdErrors = result.errors
       .filter((e) => e.rawMessage.startsWith(fileName) && !/fails to validate$/.test(e.rawMessage.trim()))
       .map((e) => e.message);
-    const value = xmlToJson(schema, instances[name] ?? '');
-    const json = validate(value);
+    // A document the JSON form has no place for counts as rejected.
+    let value: unknown;
+    let json: boolean;
+    try {
+      value = xmlToJson(schema, instances[name] ?? '', { textProperty: input.options?.textProperty ?? 'value' });
+      json = validate(value);
+    } catch (e) {
+      value = { error: e instanceof Error ? e.message : String(e) };
+      json = false;
+    }
     return {
       name,
       xsd: xsdErrors.length === 0,

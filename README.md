@@ -148,12 +148,15 @@ validation.
     "version": { "type": "string", "const": "1.0", "xml": { "attribute": true } },
     "channel": { "$ref": "#/$defs/Channel", "default": "web", "xml": { "attribute": true } },
     "Title": { "$ref": "#/$defs/Text40", "xml": { "namespace": "urn:example:order" } },
-    "Express": { "type": "boolean", "xml": { "namespace": "urn:example:order" } },
+    "Express": {
+      "type": "boolean",
+      "xml": { "namespace": "urn:example:order", "type": "{http://www.w3.org/2001/XMLSchema}boolean" }
+    },
     "Pickup": {
       "description": "The customer collects the order.",
       "type": "boolean",
-      "const": true,
-      "xml": { "namespace": "urn:example:order" }
+      "xml": { "namespace": "urn:example:order", "type": "{http://www.w3.org/2001/XMLSchema}boolean" },
+      "const": true
     },
     "Wanted": { "$ref": "#/$defs/PartialDate", "xml": { "namespace": "urn:example:order" } },
     "Note": {
@@ -161,7 +164,14 @@ validation.
       "$ref": "#/$defs/Note",
       "xml": { "namespace": "urn:example:common" }
     },
-    "DiscountCode": { "type": "string", "xml": { "namespace": "urn:example:order" } },
+    "DiscountCode": {
+      "type": "string",
+      "xml": {
+        "namespace": "urn:example:order",
+        "whiteSpace": "collapse",
+        "type": "{http://www.w3.org/2001/XMLSchema}token"
+      }
+    },
     "DiscountPercent": { "$ref": "#/$defs/Percent", "xml": { "namespace": "urn:example:order" } },
     "Contact": { "$ref": "#/$defs/Contact", "xml": { "namespace": "urn:example:order" } },
     "Line": {
@@ -174,7 +184,7 @@ validation.
     "Extensions": {
       "description": "Data of other systems, in their own namespaces.",
       "type": "object",
-      "xml": { "namespace": "urn:example:order" }
+      "xml": { "namespace": "urn:example:order", "anyElement": true }
     }
   },
   "required": ["created", "Title", "Express", "Line"],
@@ -192,13 +202,23 @@ validation.
       "required": ["value"],
       "additionalProperties": false
     },
-    "Percent": { "type": "number", "multipleOf": 0.1, "minimum": 0, "maximum": 100 },
+    "Percent": {
+      "type": "number",
+      "multipleOf": 0.1,
+      "minimum": 0,
+      "maximum": 100,
+      "xml": { "type": "{urn:example:common}Percent" }
+    },
     "Contact": {
       "type": "object",
       "properties": {
+        "#type": { "const": "{urn:example:common}Contact", "xml": { "xsiType": true } },
         "Name": { "$ref": "#/$defs/Text40", "xml": { "namespace": "urn:example:common" } },
         "Email": { "$ref": "#/$defs/Email", "xml": { "namespace": "urn:example:common" } },
-        "Phone": { "type": "string", "xml": { "namespace": "urn:example:common" } }
+        "Phone": {
+          "type": "string",
+          "xml": { "namespace": "urn:example:common", "type": "{http://www.w3.org/2001/XMLSchema}string" }
+        }
       },
       "required": ["Name", "Email"],
       "additionalProperties": false
@@ -207,13 +227,19 @@ validation.
       "description": "An amount that always says its currency.",
       "type": "object",
       "properties": {
+        "#type": { "const": "{urn:example:common}Price", "xml": { "xsiType": true } },
         "currency": { "$ref": "#/$defs/Currency", "xml": { "attribute": true } },
         "value": { "type": "number", "xml": { "text": true } }
       },
       "required": ["currency", "value"],
       "additionalProperties": false
     },
-    "Kilogram": { "type": "number", "multipleOf": 0.01, "exclusiveMinimum": 0 }
+    "Kilogram": {
+      "type": "number",
+      "multipleOf": 0.01,
+      "exclusiveMinimum": 0,
+      "xml": { "type": "{urn:example:common}Kilogram" }
+    }
   }
 }
 ```

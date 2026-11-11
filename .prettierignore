@@ -2,3 +2,5 @@ package-lock.json
 # written by the converter and compared byte for byte (src/example.test.ts)
 examples/order/order.schema.json
 examples/order/order.json
+# the JSON contract cases shared with xsd-faker, kept byte for byte
+src/test-support/contract

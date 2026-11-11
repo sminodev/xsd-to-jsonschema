@@ -1,0 +1,1 @@
+<R xmlns="urn:v:sub" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><Credit><Number>1</Number></Credit><Vehicle xsi:type="Car"><Plate>K</Plate><Seats>4</Seats></Vehicle><Pet><Name>a</Name><Breed>c</Breed></Pet><Count>1</Count></R>

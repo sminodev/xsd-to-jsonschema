@@ -1,0 +1,2 @@
+<R xmlns="urn:v:list" codes="red  green"><Numbers> 1 +02
+ 3 </Numbers><Short>4 5</Short><Repeated>6</Repeated><Repeated>7 8</Repeated><Empty/><Tokens>a b</Tokens><Refs>e1 e2</Refs><Pick>+01 002</Pick><Entry id="e1"/><Entry id="e2"/></R>

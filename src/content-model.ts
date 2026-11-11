@@ -76,14 +76,23 @@ export interface Fragment {
   dependentRequired: Record<string, string[]>;
   /** the fragment is a choice reached through a group reference */
   isChoice?: boolean;
-  /** xs:any or xs:anyAttribute allow other elements or attributes, so the object accepts other properties */
-  open?: boolean;
+  /** xs:any allows other elements, so the object accepts other properties */
+  anyElement?: boolean;
+  /** xs:anyAttribute allows other attributes, so the object accepts other properties */
+  anyAttribute?: boolean;
   /** shared by all fragments of one object */
   groupKeys: GroupKeys;
 }
 
-/** The property of an element particle; the emitter writes it, since it knows declarations and types. */
-export type ElementProperty = (node: Element, doc: SchemaDocument) => Prop | undefined;
+/**
+ * The property of an element particle; the emitter writes it, since it knows declarations and types.
+ *
+ * @param particle - the particle whose occurrences count, when `node` is a global element that stands in for it
+ */
+export type ElementProperty = (node: Element, doc: SchemaDocument, particle?: Element) => Prop | undefined;
+
+/** The global elements that may appear for an element particle; undefined if it has no substitution group. */
+export type Substitutes = (node: Element) => { node: Element; doc: SchemaDocument }[] | undefined;
 
 export function emptyFragment(groupKeys = new GroupKeys()): Fragment {
   return { props: [], required: [], constraints: [], dependentRequired: {}, groupKeys };
@@ -107,12 +116,28 @@ export function addConstraints(schema: JsonSchema, constraints: JsonSchema[]): v
   }
 }
 
-/** Writes properties and the constraints of a fragment into an object schema. */
+/** Takes over the wildcards of `inner`. */
+export function addWildcards(fragment: Fragment, inner: Fragment): void {
+  if (inner.anyElement) {
+    fragment.anyElement = true;
+  }
+  if (inner.anyAttribute) {
+    fragment.anyAttribute = true;
+  }
+}
+
+/**
+ * Writes properties and the constraints of a fragment into an object schema. An object with a wildcard stays open
+ * and says which wildcard it has in `xml`.
+ *
+ * @param xml - write the `xml` annotation
+ */
 export function writeObject(
   schema: JsonSchema,
   properties: Record<string, JsonSchema>,
   required: string[],
   fragment: Fragment,
+  xml: boolean,
 ): void {
   if (Object.keys(properties).length > 0) {
     schema.properties = properties;
@@ -120,13 +145,19 @@ export function writeObject(
   if (required.length > 0) {
     schema.required = required;
   }
-  if (!fragment.open) {
+  if (!fragment.anyElement && !fragment.anyAttribute) {
     schema.additionalProperties = false;
   }
   if (Object.keys(fragment.dependentRequired).length > 0) {
     schema.dependentRequired = fragment.dependentRequired;
   }
   addConstraints(schema, fragment.constraints);
+  if (xml && (fragment.anyElement || fragment.anyAttribute)) {
+    schema.xml = {
+      ...(fragment.anyElement ? { anyElement: true } : {}),
+      ...(fragment.anyAttribute ? { anyAttribute: true } : {}),
+    };
+  }
 }
 
 function addRequired(fragment: Fragment, keys: string[]): void {
@@ -179,6 +210,7 @@ export class ContentModel {
     private readonly elementProperty: ElementProperty,
     /** write the `xml` annotations */
     private readonly xml: boolean,
+    private readonly substitutes: Substitutes = () => undefined,
   ) {}
 
   /** Adds the model group of a complex type or derivation (its sequence, all, choice or group) to `fragment`. */
@@ -199,9 +231,7 @@ export class ContentModel {
       addRequired(fragment, inner.required);
     }
     fragment.constraints.push(...inner.constraints);
-    if (inner.open) {
-      fragment.open = true;
-    }
+    addWildcards(fragment, inner);
     for (const [key, list] of Object.entries(inner.dependentRequired)) {
       fragment.dependentRequired[key] = [...new Set([...(fragment.dependentRequired[key] ?? []), ...list])];
     }
@@ -235,6 +265,11 @@ export class ContentModel {
     }
     switch (child.localName) {
       case 'element': {
+        const members = this.substitutes(child);
+        if (members) {
+          this.substitutionGroup(child, members, fragment, min, max);
+          return;
+        }
         const prop = this.elementProperty(child, doc);
         if (prop) {
           this.addProp(fragment, prop);
@@ -275,7 +310,7 @@ export class ContentModel {
         return;
       }
       case 'any':
-        fragment.open = true;
+        fragment.anyElement = true;
         this.problems.warning(
           'unsupported-any',
           'xs:any: the object accepts other properties without checking them',
@@ -284,6 +319,56 @@ export class ContentModel {
         return;
       default:
         this.problems.error('unsupported-particle', `xs:${child.localName} is not supported here`, this.set.at(child));
+    }
+  }
+
+  /**
+   * A particle that refers to the head of a substitution group: a choice between the head, unless it is abstract,
+   * and its members, with the occurrences of the particle. With `maxOccurs` greater than 1, each member that occurs
+   * is an array; how many there are together isn't checked.
+   */
+  private substitutionGroup(
+    child: Element,
+    members: { node: Element; doc: SchemaDocument }[],
+    fragment: Fragment,
+    min: number,
+    max: number,
+  ): void {
+    if (members.length === 0) {
+      this.problems.error(
+        'unsupported-element',
+        `${attr(child, 'ref') ?? ''} is abstract and no element may stand in for it`,
+        this.set.at(child),
+      );
+      return;
+    }
+    if (max <= 1) {
+      const branches = members.flatMap((member) => {
+        const branch = emptyFragment(fragment.groupKeys);
+        const prop = this.elementProperty(member.node, member.doc, child);
+        if (!prop) {
+          return [];
+        }
+        this.addProp(branch, prop);
+        addRequired(branch, [prop.key]);
+        return [{ fragment: branch, node: child }];
+      });
+      this.merge(fragment, this.choiceOf(branches, min === 0, fragment.groupKeys), true);
+      return;
+    }
+    const keys: string[] = [];
+    for (const member of members) {
+      const prop = this.elementProperty(member.node, member.doc, child);
+      if (!prop?.occurrences) {
+        continue;
+      }
+      // Each member alone may occur up to maxOccurs times; at least one of them as often as minOccurs says.
+      const occurrences = { ...prop.occurrences, min: 0, optional: true };
+      this.addProp(fragment, { ...prop, schema: occurrences.array(0, max), occurrences });
+      keys.push(prop.key);
+    }
+    if (min > 0 && keys.length > 0) {
+      fragment.constraints.push({ anyOf: keys.map((key) => ({ required: [key] })) });
     }
   }
 
@@ -322,7 +407,13 @@ export class ContentModel {
       definition ? (attr(definition.node, 'name') ?? '') : (node.localName ?? ''),
     );
     const item: JsonSchema = { type: 'object' };
-    writeObject(item, Object.fromEntries(inner.props.map((prop) => [prop.key, prop.schema])), inner.required, inner);
+    writeObject(
+      item,
+      Object.fromEntries(inner.props.map((prop) => [prop.key, prop.schema])),
+      inner.required,
+      inner,
+      this.xml,
+    );
     const array = (low: number, high: number): JsonSchema => {
       const list: JsonSchema = { type: 'array', items: item };
       if (low > 0) {
@@ -381,9 +472,7 @@ export class ContentModel {
     const fragment = emptyFragment(inner.groupKeys);
     fragment.props = inner.props;
     fragment.constraints = [constraint];
-    if (inner.open) {
-      fragment.open = true;
-    }
+    addWildcards(fragment, inner);
     return fragment;
   }
 
@@ -406,8 +495,15 @@ export class ContentModel {
       }
       branches.push({ fragment: branch, node: child });
     }
+    return this.choiceOf(branches, optional, keys);
+  }
+
+  /** The fragment of a choice between `branches`, as described for `choice`. */
+  private choiceOf(branches: { fragment: Fragment; node: Element }[], optional: boolean, keys: GroupKeys): Fragment {
     const fragment = emptyFragment(keys);
-    fragment.open = branches.some((b) => b.fragment.open);
+    for (const { fragment: branch } of branches) {
+      addWildcards(fragment, branch);
+    }
     for (const { fragment: branch, node: child } of branches) {
       for (const prop of branch.props) {
         const existing = fragment.props.find((p) => p.key === prop.key);

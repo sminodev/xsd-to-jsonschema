@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Schemaless mapping of wildcard content (xs:any, xs:anyAttribute). -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:v:any" targetNamespace="urn:v:any" elementFormDefault="qualified">
+  <xs:element name="R">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Head" type="xs:string"/>
+        <xs:element name="Ext">
+          <xs:complexType>
+            <xs:sequence><xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/></xs:sequence>
+            <xs:anyAttribute namespace="##other" processContents="lax"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="Fixed" minOccurs="0">
+          <xs:complexType><xs:sequence><xs:element name="Amount" type="xs:int"/></xs:sequence></xs:complexType>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>
