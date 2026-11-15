@@ -7,7 +7,9 @@ Schema documents for the element `{urn:test:ds}Sig`; `sample.xml` is a valid doc
 - `rejected-*`: `unsafe-input`, without a schema. The rest of the name says why, for example an entity that the
   document uses, an external entity, a parameter entity reference, an `ELEMENT` declaration, a namespace default the
   root element doesn't state with the same text, a predefined entity declared again, markup in an entity value, a
-  missing space, a character that is no XML name character, or a declaration after the root element.
-- `malformed-*`: `invalid-xml`: a second byte order mark, or white space before the XML declaration.
+  missing space (also between two attribute definitions), a character that is no XML name character, or a
+  declaration after the root element.
+- `malformed-*`: `invalid-xml`: a second byte order mark, white space before the XML declaration, or a byte order mark
+  or an XML declaration later in the prolog.
 
 `src/doctype.test.ts` runs every case.

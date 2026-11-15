@@ -101,16 +101,18 @@ const { schema, problems } = convertFile('order.xsd', {
 });
 ```
 
-| Setting                | CLI flag                 | Default                                | Description                                                                                            |
-| ---------------------- | ------------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `root`                 | `--root <name>`          | The entry schema's only global element | Root element to convert; required if the choice is ambiguous.                                          |
-| `options.dateTime`     | `--date-time <mode>`     | `pattern`                              | Use XML Schema date/time patterns or JSON Schema `format` values.                                      |
-| `options.xml`          | `--no-xml`               | `true`                                 | Include the `xml` annotations.                                                                         |
-| `options.textProperty` | `--text-property <name>` | `value`                                | Property for the text of an element with simple content: an NCName other than `__proto__`, or `#text`. |
-| `baseDirectory`        | `--base-dir <directory>` | The entry's directory                  | Directory schemas may be read from, for `convertFile` and the CLI.                                     |
-| `limits.maxFileBytes`  | `--max-file-bytes <n>`   | `4194304` (4 MiB)                      | Bytes per schema document; see [Schema input](docs/output.md#schema-input).                            |
-| `limits.maxTotalBytes` | `--max-total-bytes <n>`  | `16777216` (16 MiB)                    | Bytes of all schema documents together.                                                                |
-| `limits.maxDocuments`  | `--max-documents <n>`    | `128`                                  | Number of schema documents.                                                                            |
+| Setting                   | CLI flag                   | Default                                | Description                                                                                                                    |
+| ------------------------- | -------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `root`                    | `--root <name>`            | The entry schema's only global element | Root element to convert; required if the choice is ambiguous.                                                                  |
+| `options.dateTime`        | `--date-time <mode>`       | `pattern`                              | Use XML Schema date/time patterns or JSON Schema `format` values.                                                              |
+| `options.xml`             | `--no-xml`                 | `true`                                 | Include the `xml` annotations.                                                                                                 |
+| `options.textProperty`    | `--text-property <name>`   | `value`                                | Property for the text of an element with simple content: an NCName other than `__proto__`, or `#text`.                         |
+| `baseDirectory`           | `--base-dir <directory>`   | The entry's directory                  | Directory schemas may be read from, for `convertFile` and the CLI.                                                             |
+| `limits.maxFileBytes`     | `--max-file-bytes <n>`     | `4194304` (4 MiB)                      | Bytes per schema document; see [Schema input](docs/output.md#schema-input).                                                    |
+| `limits.maxTotalBytes`    | `--max-total-bytes <n>`    | `16777216` (16 MiB)                    | Bytes of all schema documents together.                                                                                        |
+| `limits.maxDocuments`     | `--max-documents <n>`      | `128`                                  | Number of schema documents.                                                                                                    |
+| `limits.maxOutputEntries` | `--max-output-entries <n>` | `200000`                               | Output entries of the schema: each key of a `properties` map and each branch of an `anyOf` or `oneOf`, wherever it is written. |
+| `limits.maxStructureSize` | –                          | `20000000`                             | Structure units of the report of `describeSchema()`; see [Structure report](docs/structure.md#limits).                         |
 
 With `dateTime: 'format'`, make sure your validator is configured to validate formats. The accepted date and time
 forms differ from XML Schema: RFC 3339 requires a time zone, so `xs:dateTime` and `xs:time` values without one, such as
@@ -119,10 +121,10 @@ always carry a time zone; see [Dates and times](docs/output.md#dates-and-times).
 
 ### Structure report
 
-`describeSchema()` and `describeSchemaFile()` return the same schema and problems as `convert()` and `convertFile()`,
-plus a report of the XML Schema's structure: particles in order with their compositors, wildcards, identity constraints
-and the raw facets, each linked to its property in the schema. The [structure documentation](docs/structure.md)
-describes it.
+`describeSchema()` and `describeSchemaFile()` return the same schema and problems as `convert()` and `convertFile()`
+for a report within `limits.maxStructureSize`, plus a report of the XML Schema's structure: particles in order with
+their compositors, wildcards, identity constraints and the raw facets, each linked to its property in the schema. The
+[structure documentation](docs/structure.md) describes it.
 
 ## Example: a multi-file order schema
 

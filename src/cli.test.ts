@@ -208,6 +208,29 @@ describe('convertFile and the command line', () => {
     }
   });
 
+  it('stops above --max-output-entries: no schema on stdout and no output file, the limit in the message', () => {
+    const file = join(dir, 'derived.xsd');
+    writeFileSync(
+      file,
+      `<xs:schema ${XS}><xs:complexType name="B"><xs:sequence><xs:element name="a" type="xs:int"/></xs:sequence></xs:complexType>
+      <xs:complexType name="D"><xs:complexContent><xs:extension base="B"><xs:sequence><xs:element name="c" type="xs:int"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>
+      <xs:element name="r"><xs:complexType><xs:sequence><xs:element name="x" type="D"/></xs:sequence></xs:complexType></xs:element></xs:schema>`,
+    );
+    // The root holds x, D holds #type, a and c: 4 output entries.
+    const over = capture();
+    expect(run([file, '--max-output-entries', '3', '--out', 'kept.json'], over.io)).toBe(2);
+    expect([over.out.stdout, over.out.files]).toEqual(['', {}]);
+    expect(over.out.stderr).toContain(
+      'error resource-limit: derived.xsd: the schema exceeds the limit of 3 output entries (maxOutputEntries)',
+    );
+    expect(run([file, '--max-output-entries', '4'], capture().io)).toBe(0);
+    for (const bad of ['0', '1.5', 'x', '9007199254740992']) {
+      const { out, io } = capture();
+      expect(run([file, '--max-output-entries', bad], io)).toBe(2);
+      expect(out.stderr).toBe('--max-output-entries must be a positive integer\n');
+    }
+  });
+
   it('exits with 2 and a message when the entry is a directory or the output cannot be written', () => {
     const directory = capture();
     expect(run([join(dir, 'types'), '--root', 'A'], directory.io)).toBe(2);

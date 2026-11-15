@@ -60,8 +60,9 @@ export function decodeSchema(bytes: Uint8Array): string {
     return text;
   }
   const bom = starts(0xef, 0xbb, 0xbf);
-  // The declaration is ASCII in every encoding read here without a byte order mark of UTF-16.
-  const head = codes(bytes.subarray(bom ? 3 : 0, Math.min(bytes.length, 512)));
+  // The declaration is ASCII in every encoding read here without a byte order mark of UTF-16; it is read to its end.
+  const from = bom ? 3 : 0;
+  const head = codes(bytes.subarray(from, declarationEnd(bytes, from)));
   const name = declared(head);
   const encoding = name === undefined ? 'utf-8' : NAMES[name.toUpperCase()];
   if (encoding === undefined) {
@@ -86,6 +87,26 @@ export function decodeSchema(bytes: Uint8Array): string {
     case 'latin1':
       return codes(bytes);
   }
+}
+
+/**
+ * Where the XML declaration that starts at `from` ends: after its `?>`, however long it is; `from` without one. A
+ * declaration that ends before its `?>` is not XML.
+ */
+function declarationEnd(bytes: Uint8Array, from: number): number {
+  const opens = [0x3c, 0x3f, 0x78, 0x6d, 0x6c].every((b, k) => bytes[from + k] === b); // <?xml
+  if (!opens || ![0x20, 0x09, 0x0d, 0x0a].includes(bytes[from + 5] ?? 0)) {
+    return from;
+  }
+  for (let k = from + 6; k + 1 < bytes.length; k += 1) {
+    if (bytes[k] === 0x3f && bytes[k + 1] === 0x3e) {
+      return k + 2;
+    }
+    if (bytes[k] === 0x3c) {
+      break;
+    }
+  }
+  throw new EncodingError('invalid-xml', 'the XML declaration does not end with ?>');
 }
 
 /** Each byte as the character of the same code point, in chunks small enough for the argument list. */

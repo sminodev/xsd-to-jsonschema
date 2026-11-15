@@ -21,6 +21,9 @@ Options:
   --max-file-bytes <n>   bytes per schema document (default: 4194304)
   --max-total-bytes <n>  bytes of all schema documents (default: 16777216)
   --max-documents <n>    schema documents (default: 128)
+  --max-output-entries <n>
+                         output entries of the schema written: each key of a properties map and
+                         each branch of an anyOf or oneOf, wherever it is written (default: 200000)
   --strict               also exit with 1 on warnings
   -h, --help             show this help
 
@@ -31,13 +34,14 @@ Exit codes:
   0  schema written without errors (warnings are allowed unless --strict is set)
   1  schema written, but errors or, with --strict, warnings were reported
   2  no schema written: bad arguments, an unreadable entry schema, a missing or unknown
-     root element, a size limit or unsafe input in any schema document, or an output
-     file that can't be written`;
+     root element, a size limit or unsafe input in any schema document, a schema above
+     --max-output-entries, or an output file that can't be written`;
 
 const LIMIT_OPTIONS = [
   ['max-file-bytes', 'maxFileBytes'],
   ['max-total-bytes', 'maxTotalBytes'],
   ['max-documents', 'maxDocuments'],
+  ['max-output-entries', 'maxOutputEntries'],
 ] as const;
 
 export interface Io {
@@ -67,6 +71,7 @@ function readArguments(argv: string[], io: Io) {
         'max-file-bytes': { type: 'string' },
         'max-total-bytes': { type: 'string' },
         'max-documents': { type: 'string' },
+        'max-output-entries': { type: 'string' },
         strict: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },

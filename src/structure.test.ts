@@ -1,4 +1,6 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { convert, type ConvertInput, type ConvertOptions } from './convert.js';
 import { describeSchema, type DescribeSchemaResult } from './describe.js';
@@ -805,3 +807,142 @@ function problemIndexes(structure: Structure): number[] {
   visit(structure.types);
   return out;
 }
+
+describe('the limit of the structure report', () => {
+  // The structure unit, written here apart from the product: every value 1, every field name 1, a string also its
+  // length, summed over the whole report.
+  const units = (value: unknown): number => {
+    if (typeof value === 'string') return 1 + value.length;
+    if (Array.isArray(value)) return value.reduce((n: number, v) => n + units(v), 1);
+    if (value !== null && typeof value === 'object') {
+      return Object.values(value).reduce((n: number, v) => n + 1 + units(v), 1);
+    }
+    return value === undefined ? 0 : 1;
+  };
+  const sizeOf = (structure: Structure): number => units(structure);
+  // Groups that each refer twice to the one below, around a leaf that brings along what `leaf` declares.
+  const doubled = (depth: number, leaf = '<xs:element name="leaf" type="xs:int"/>', chain = 0): string => {
+    let body = `<xs:group name="G0"><xs:sequence>${leaf}</xs:sequence></xs:group>`;
+    for (let i = 1; i <= depth; i++) {
+      body += `<xs:group name="G${i}"><xs:sequence><xs:group ref="G${i - 1}"/><xs:group ref="G${i - 1}"/></xs:sequence></xs:group>`;
+    }
+    let top = `<xs:group ref="G${depth}"/>`;
+    // A chain of repeated groups above makes every pointer longer.
+    for (let i = 1; i <= chain; i++) {
+      body += `<xs:group name="C${i}"><xs:sequence><xs:element name="s${i}" type="xs:int"/>${top}</xs:sequence></xs:group>`;
+      top = `<xs:group ref="C${i}" maxOccurs="2"/>`;
+    }
+    return `<xs:schema ${XS}>${body}<xs:element name="r"><xs:complexType><xs:sequence>${top}</xs:sequence></xs:complexType></xs:element></xs:schema>`;
+  };
+  const run = (text: string, maxStructureSize?: number) =>
+    describeSchema({
+      files: { 'a.xsd': text },
+      entry: 'a.xsd',
+      ...(maxStructureSize === undefined ? {} : { limits: { maxStructureSize } }),
+    });
+  const identity = (count: number) =>
+    `<xs:element name="leaf" type="xs:int">${Array.from({ length: count }, (_, i) => `<xs:unique name="u${i}"><xs:selector xpath="p:a" xmlns:p="urn:p"/><xs:field xpath="@k${i}"/><xs:field xpath="p:b"/></xs:unique>`).join('')}</xs:element>`;
+
+  it('decide at the size of the report, and then write neither a schema nor a report', () => {
+    for (const text of [doubled(4), doubled(4, identity(5)), doubled(3, undefined, 6)]) {
+      const free = run(text);
+      const size = sizeOf(free.structure as Structure);
+      expect(run(text, size)).toEqual(free);
+      const over = run(text, size - 1);
+      expect(over.schema).toBeUndefined();
+      expect(over.structure).toBeUndefined();
+      expect(over.problems.slice(0, -1)).toEqual(free.problems);
+      expect(over.problems.at(-1)).toMatchObject({
+        code: 'resource-limit',
+        severity: 'error',
+        message: `the structure report exceeds the limit of ${size - 1} structure units (maxStructureSize)`,
+      });
+      // convert() doesn't use the limit.
+      const input = { files: { 'a.xsd': text }, entry: 'a.xsd' };
+      expect(convert({ ...input, limits: { maxStructureSize: 1 } })).toEqual(convert(input));
+    }
+  });
+
+  it('count what each particle brings along, not only the particles', () => {
+    // The same particles with longer pointers or with identity constraints make a larger report.
+    const plain = sizeOf(run(doubled(4)).structure as Structure);
+    const short = sizeOf(run(doubled(4, undefined, 2)).structure as Structure);
+    const long = sizeOf(run(doubled(4, undefined, 40)).structure as Structure);
+    const constraints = sizeOf(run(doubled(4, identity(20))).structure as Structure);
+    expect(long).toBeGreaterThan(5 * short);
+    expect(constraints).toBeGreaterThan(3 * plain);
+    expect(run(doubled(4, identity(20)), plain * 2).structure).toBeUndefined();
+  });
+
+  it('stop a report that doubles with every level before it is built', () => {
+    const started = performance.now();
+    const { schema, structure, problems } = run(doubled(30));
+    expect(performance.now() - started).toBeLessThan(5000);
+    expect([schema, structure]).toEqual([undefined, undefined]);
+    expect(problems.map((p) => p.code)).toEqual(['resource-limit']);
+  });
+
+  it('count the attributes each type lists, also those of attribute groups and bases', () => {
+    const groups = (depth: number) => {
+      let body =
+        '<xs:attributeGroup name="A0"><xs:attribute name="a" type="xs:int"/><xs:anyAttribute namespace="##other"/></xs:attributeGroup>';
+      for (let i = 1; i <= depth; i++) {
+        body += `<xs:attributeGroup name="A${i}"><xs:attributeGroup ref="A${i - 1}"/><xs:attributeGroup ref="A${i - 1}"/><xs:anyAttribute namespace="##other"/></xs:attributeGroup>`;
+      }
+      return `<xs:schema ${XS}>${body}<xs:element name="r"><xs:complexType><xs:attributeGroup ref="A${depth}"/></xs:complexType></xs:element></xs:schema>`;
+    };
+    let chain = '<xs:complexType name="T0"><xs:attribute name="a0" type="xs:int"/></xs:complexType>';
+    for (let i = 1; i <= 30; i++) {
+      chain += `<xs:complexType name="T${i}"><xs:complexContent><xs:extension base="T${i - 1}"><xs:attribute name="a${i}" type="xs:int"/></xs:extension></xs:complexContent></xs:complexType>`;
+    }
+    for (const text of [groups(4), `<xs:schema ${XS}>${chain}<xs:element name="r" type="T30"/></xs:schema>`]) {
+      const free = run(text);
+      const size = sizeOf(free.structure as Structure);
+      expect(run(text, size)).toEqual(free);
+      expect(run(text, size - 1).structure).toBeUndefined();
+    }
+    // 2^24 attributes and wildcards: stopped as they are listed.
+    const started = performance.now();
+    const stopped = run(groups(24));
+    expect([stopped.schema, stopped.structure, stopped.problems.at(-1)?.code]).toEqual([
+      undefined,
+      undefined,
+      'resource-limit',
+    ]);
+    expect(performance.now() - started).toBeLessThan(5000);
+  });
+
+  it('give resource-limit, not a RangeError, where the report nests deeper than the stack reaches', () => {
+    let body = '<xs:element name="leaf" type="xs:int"/>';
+    for (let i = 0; i < 700; i++) {
+      body = `<xs:element name="e${i % 7}"><xs:complexType><xs:sequence>${body}</xs:sequence></xs:complexType></xs:element>`;
+    }
+    const text = `<xs:schema ${XS}>${body.replace(/^<xs:element name="e\d"/, '<xs:element name="r"')}</xs:schema>`;
+    // convert() writes the schema; the report goes deeper and gives none, as for any limit.
+    expect(convert({ files: { 'a.xsd': text }, entry: 'a.xsd' }).schema).toBeDefined();
+    const file = join(mkdtempSync(join(tmpdir(), 'x2j-')), 'deep.xsd');
+    writeFileSync(file, text);
+    for (const result of [run(text), describeSchemaFile(file)]) {
+      expect([result.schema, result.structure]).toEqual([undefined, undefined]);
+      expect(result.problems.at(-1)).toMatchObject({
+        code: 'resource-limit',
+        message: 'the schema nests deeper than the converter can follow',
+      });
+    }
+  });
+
+  it('apply to describeSchemaFile and refuse a limit that is no positive safe integer', () => {
+    const file = new URL('../examples/order/order.xsd', import.meta.url).pathname;
+    const free = describeSchemaFile(file);
+    const size = sizeOf(free.structure as Structure);
+    expect(describeSchemaFile(file, { limits: { maxStructureSize: size } })).toEqual(free);
+    const over = describeSchemaFile(file, { limits: { maxStructureSize: size - 1 } });
+    expect([over.schema, over.structure, over.problems.at(-1)?.code]).toEqual([undefined, undefined, 'resource-limit']);
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53, '8']) {
+      expect(() => run(doubled(1), bad as number)).toThrow('limits.maxStructureSize must be a positive safe integer');
+      expect(() =>
+        convert({ files: { 'a.xsd': doubled(1) }, entry: 'a.xsd', limits: { maxStructureSize: bad as number } }),
+      ).toThrow('limits.maxStructureSize must be a positive safe integer');
+    }
+  });
+});

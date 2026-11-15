@@ -10,8 +10,9 @@
 // The scan follows the XML grammar: a comment ends at the first `-->` after its `<!--`, white space stands where XML
 // requires it, names consist of XML name characters, and an entity value with `<` is no literal text. An entity name
 // in a comment, CDATA section or processing instruction is no reference. A markup declaration after the prolog is
-// refused too. A second byte order mark or white space before the XML declaration makes the document invalid. Every
-// part reads the text once, so the time grows linearly with its length.
+// refused too. A second byte order mark, white space before the XML declaration, and a byte order mark or an XML
+// declaration anywhere later in the prolog make the document invalid. Every part reads the text once, so the time
+// grows linearly with its length.
 //
 // Such a declaration is replaced by spaces, keeping line breaks, so that positions stay. Anything else is refused.
 
@@ -38,6 +39,8 @@ const NAME = new RegExp(`^[${NAME_START}][${NAME_CHAR}]*$`, 'u');
 const isSpace = (c: string): boolean => c === ' ' || c === '\t' || c === '\r' || c === '\n';
 
 class Refused extends Error {}
+/** Not well-formed XML, found while reading the prolog. */
+class Invalid extends Error {}
 
 /** Checks the document type declaration of a document and neutralizes it if it is the one harmless form. */
 export function checkDoctype(text: string): DoctypeCheck {
@@ -49,13 +52,13 @@ export function checkDoctype(text: string): DoctypeCheck {
     return { kind: 'invalid', reason: 'white space before the XML declaration' };
   }
   try {
-    const start = prologEnd(text, first);
+    const start = prologEnd(text, first, first);
     if (!isDeclaration(text, start)) {
       scanBody(text, start, new Set());
       return { kind: 'none' };
     }
     const { end, entities, defaults } = new Scanner(text, start).doctype();
-    const root = prologEnd(text, end);
+    const root = prologEnd(text, end, -1);
     if (isDeclaration(text, root)) {
       throw new Refused('a second markup declaration before the root element');
     }
@@ -67,6 +70,9 @@ export function checkDoctype(text: string): DoctypeCheck {
     if (e instanceof Refused) {
       return { kind: 'refused', reason: e.message };
     }
+    if (e instanceof Invalid) {
+      return { kind: 'invalid', reason: e.message };
+    }
     throw e;
   }
 }
@@ -76,13 +82,20 @@ const isDeclaration = (text: string, i: number): boolean => text.startsWith('<!'
 
 /**
  * Where the prolog ends: the first markup after white space, processing instructions and comments. A comment ends at
- * the first `-->` after its `<!--`, so `<!--->` doesn't end one.
+ * the first `-->` after its `<!--`, so `<!--->` doesn't end one. The XML declaration may only stand at `declaration`,
+ * the start of the document, and a byte order mark only before it; elsewhere in the prolog either is not XML.
  */
-function prologEnd(text: string, from: number): number {
+function prologEnd(text: string, from: number, declaration: number): number {
   let i = from;
   for (;;) {
     while (i < text.length && isSpace(text.charAt(i))) {
       i += 1;
+    }
+    if (text.startsWith(BOM, i)) {
+      throw new Invalid('a byte order mark that is not at the start');
+    }
+    if (i !== declaration && /^<\?xml[ \t\r\n?]/.test(text.slice(i, i + 6))) {
+      throw new Invalid('an XML declaration that is not at the start');
     }
     const [open, close] = text.startsWith('<?', i) ? ['<?', '?>'] : text.startsWith('<!--', i) ? ['<!--', '-->'] : [];
     const end = open === undefined || close === undefined ? -1 : text.indexOf(close, i + open.length);
@@ -246,10 +259,14 @@ class Scanner {
     this.space();
     const element = this.name();
     for (;;) {
-      this.skip();
+      const spaced = this.skip();
       if (this.at('>')) {
         this.i += 1;
         return;
+      }
+      // Each attribute definition starts with white space (XML 1.0, 3.3: AttDef ::= S Name S AttType S DefaultDecl).
+      if (!spaced) {
+        throw new Refused(`white space expected at offset ${this.i}`);
       }
       const name = this.name();
       if (name !== 'xmlns' && !name.startsWith('xmlns:')) {
@@ -301,10 +318,13 @@ class Scanner {
     this.skip();
   }
 
-  private skip(): void {
+  /** Moves past white space; true if there was any. */
+  private skip(): boolean {
+    const start = this.i;
     while (isSpace(this.text.charAt(this.i))) {
       this.i += 1;
     }
+    return this.i > start;
   }
 
   /** A name: up to the next delimiter, then checked against the XML name characters. */

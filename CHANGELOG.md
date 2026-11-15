@@ -7,6 +7,45 @@ Release versions follow [Semantic Versioning](http://semver.org/spec/v2.0.0.html
   particles in order, compositors, wildcards, identity constraints and raw facets, each linked to its property by a JSON
   Pointer; see [Structure report](docs/structure.md).
 - Export `isMultipleOf()`, the decimal `multipleOf` check for Ajv; see [Validating with Ajv](docs/validation.md).
+- Read `mixed` as XML Schema 1.0 does: `mixed` on `complexContent` decides, otherwise `mixed` on `complexType`. A type
+  with `mixed="true"` whose `complexContent` says `mixed="false"` now has element content instead of markup, and no
+  `unsupported-mixed` warning. White space around the value counts as for any `xs:boolean`: `mixed=" true "` is
+  mixed.
+- Convert chains of 500 nested unions on Node.js 22.13.0. List and union nesting beyond 1000 levels reports
+  `resource-limit`.
+- Keep U+0085, U+2028 and U+2029 in schema text: XML 1.0 ends lines with CR LF and CR only. They were read as line
+  feeds, so enumeration, `fixed` and `pattern` values with them got a space.
+- Write an `xs:float` value beyond the range of a float, such as `1e39` in `fixed`, `default`, an enumeration or a
+  bound, as `INF` or `-INF`; it gave a bound of `null` and a schema Ajv rejects, and a `fixed` or `default` beyond the
+  range of a double, such as `1e400`, was dropped as `invalid-value`. An `xs:float` type that allows `INF`
+  or `-INF` also allows the numbers that round to them, from 3.4028235677973366e38 on, and one that rules them out
+  rules out these numbers too; see [Special float values](docs/output.md#special-float-values).
+- Compare the items of a list of `xs:float` with an enumeration or `fixed` value as 32-bit floats, place by place:
+  each enumerated list is an array of the item values in their place, so `0.10000000149011612 2` matches the
+  enumeration `0.1 2` and `1 1e39` matches `1 INF`. They were compared as JSON numbers.
+- Convert types with many attributes or elements in linear time: 88,000 attributes in one type took over a minute.
+- Convert wide choices whose names occur again later in the object in time near linear in their size: a choice of 2,000
+  optional elements that all occur again after it took 90 seconds.
+- Nested model groups, chains of group references and chains of derived types reach the limit of the converter's stack
+  at fewer levels than before, most of all in a fresh process such as the command line starts: such a schema can now
+  give `resource-limit` where the previous version still wrote one. Local element types still convert to 1000 levels.
+  See [Limits](docs/output.md#limits).
+- Read a group referred to again in one object only once, also where each reference is a repeated group: groups that
+  each refer twice to the next took time exponential in their depth.
+- Add the limit `maxStructureSize` for `describeSchema()` and `describeSchemaFile()`, by default 20000000 structure
+  units: the whole report, where every value counts 1, every field name 1 and a string also its length. Above it there
+  is neither a schema nor a structure, and `problems` ends with `resource-limit`; `schema` and `problems` equal those
+  of `convert()` only for a report that fits. Groups or attribute groups that each refer twice to the next one made a
+  report that doubled with every level until the memory ran out. A report that nests deeper than the stack reaches
+  also gives `resource-limit` instead of throwing a `RangeError`. See [Structure report](docs/structure.md#limits).
+- Add the limit `maxOutputEntries` (CLI: `--max-output-entries`), by default 200000: the output entries of the schema,
+  each key of a `properties` map and each branch of an `anyOf` or `oneOf`, wherever it is written. Above it,
+  `resource-limit` and no schema; a long chain of extensions whose types are all used stops early instead of filling
+  the memory. See [Schema input](docs/output.md#schema-input).
+- Report an XML declaration or byte order mark later in the prolog as `invalid-xml`, and an ATTLIST without white space
+  between its definitions as `unsafe-input`. Read an XML declaration to its end, however long; one without `?>` is
+  `invalid-xml`.
+- Document that Ajv also throws a `RangeError` for repeated choices nested about 200 deep.
 - Require Node.js 22.13 or later to support the ESLint 10 toolchain.
 - Check the npm package in CI on the exact minimum Node.js version.
 - Write a repeated sequence, choice or group reference as one property with an object per occurrence, such as

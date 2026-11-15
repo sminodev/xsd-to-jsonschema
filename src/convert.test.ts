@@ -1,6 +1,8 @@
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import { describe, expect, it } from 'vitest';
 import { convert } from './convert.js';
+import { describeSchema } from './describe.js';
+import { outputEntries } from './keys.js';
 import type { JsonSchema } from './json-schema.js';
 import type { Problem } from './problems.js';
 import { ajvFor } from './test-support/oracle.js';
@@ -1157,6 +1159,17 @@ describe('convert', () => {
       }
     });
 
+    it('apply the output limit to flat union branches and stop when the traversal is too deep', () => {
+      const input = { files: { 'a.xsd': xs(unionChain(500)) }, entry: 'a.xsd', root: 'r' };
+      const limited = convert({ ...input, limits: { maxOutputEntries: 501 } });
+      expect(limited.schema).toBeUndefined();
+      expect(codes(limited.problems)).toContain('resource-limit');
+      const deep = run(unionChain(1100));
+      expect(deep.schema).toBeUndefined();
+      expect(codes(deep.problems)).toEqual(['resource-limit']);
+      expect(deep.problems[0]?.message).toBe('the schema nests deeper than the converter can follow');
+    });
+
     it('refer to a named union with facets of its own instead of nesting it', () => {
       const { schema: out } = run(
         `<xs:simpleType name="Short"><xs:restriction><xs:simpleType><xs:union memberTypes="xs:int xs:boolean"/></xs:simpleType><xs:pattern value=".{1,5}"/></xs:restriction></xs:simpleType>
@@ -1179,6 +1192,528 @@ describe('convert', () => {
     it('read a document of 500 nested repeated choices without an exception', () => {
       const { schema: out } = run(nestedChoices(500));
       expect(() => xmlToJson(out ?? {}, '<r><a>1</a></r>')).not.toThrow();
+    });
+  });
+  describe('mixed content, line ends, breadth and float infinities', () => {
+    const xs = (body: string) => `<xs:schema ${XS}>${body}</xs:schema>`;
+    const run = (body: string) => convert({ files: { 'a.xsd': xs(body) }, entry: 'a.xsd', root: 'r' });
+
+    it('read mixed from complexContent, otherwise from complexType', () => {
+      const derived = (base: string, outer: string, inner: string) =>
+        `<xs:complexType name="B"${base}><xs:sequence><xs:element name="b" type="xs:int"/></xs:sequence></xs:complexType>
+        <xs:complexType name="D"${outer}><xs:complexContent${inner}><xs:extension base="B"><xs:sequence>
+        <xs:element name="c" type="xs:int"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>
+        <xs:element name="r" type="D"/>`;
+      // complexContent says the content is elements only, whatever complexType says.
+      const elements = run(derived('', ' mixed="true"', ' mixed="false"'));
+      expect(codes(elements.problems)).toEqual([]);
+      const json = xmlToJson(elements.schema ?? {}, '<r><b>1</b><c>2</c></r>');
+      expect(json).toEqual({ b: 1, c: 2 });
+      expect(ajvFor(elements.schema ?? {})(json)).toBe(true);
+      for (const [outer, inner] of [
+        [' mixed="false"', ' mixed="true"'],
+        ['', ' mixed="true"'],
+        [' mixed="true"', ''],
+      ]) {
+        expect(codes(run(derived(' mixed="true"', outer ?? '', inner ?? '')).problems)).toContain('unsupported-mixed');
+      }
+    });
+
+    it('read mixed as xs:boolean does, with white space around true, 1, false or 0, written or as references', () => {
+      const derived = (base: string, outer: string, inner: string) =>
+        `<xs:complexType name="B" mixed="${base}"><xs:sequence><xs:element name="b" type="xs:int"/></xs:sequence></xs:complexType>
+        <xs:complexType name="D" mixed="${outer}"><xs:complexContent mixed="${inner}"><xs:extension base="B"><xs:sequence>
+        <xs:element name="c" type="xs:int"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>
+        <xs:element name="r" type="D"/>`;
+      const plain = (value: string) =>
+        `<xs:element name="r"><xs:complexType mixed="${value}"><xs:sequence><xs:element name="b" type="xs:int"/></xs:sequence></xs:complexType></xs:element>`;
+      const mixed = (body: string) => {
+        const input = { files: { 'a.xsd': xs(body) }, entry: 'a.xsd', root: 'r' };
+        const written = codes(convert(input).problems).includes('unsupported-mixed');
+        // The structure report reads mixed the same way.
+        const { structure } = describeSchema(input);
+        const root = structure?.types[structure.root.type];
+        expect(root && 'mixed' in root ? root.mixed : undefined).toBe(written);
+        return written;
+      };
+      for (const value of ['\ttrue\n', ' 1 ', '&#x9;true&#xA;', '&#xD; 1&#x20;']) {
+        expect([value, mixed(plain(value))]).toEqual([value, true]);
+      }
+      for (const value of [' false ', '&#x9;0', 'tr ue', 'yes']) {
+        expect([value, mixed(plain(value))]).toEqual([value, false]);
+      }
+      // complexContent decides, also when it says false with white space around it.
+      expect(mixed(derived('false', ' true ', '&#x9;false&#xA;'))).toBe(false);
+      expect(mixed(derived('true', 'false', ' 1 '))).toBe(true);
+    });
+
+    it('keep U+0085, U+2028 and U+2029 in schema text, written or as character references', () => {
+      for (const char of ['\u0085', ' ', ' ']) {
+        const reference = `&#x${(char.codePointAt(0) ?? 0).toString(16)};`;
+        for (const written of [char, reference]) {
+          const { schema: out } = run(
+            `<xs:element name="r"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="a${written}b"/></xs:restriction></xs:simpleType></xs:element>`,
+          );
+          expect(out?.enum).toEqual([`a${char}b`]);
+          const validate = ajvFor(out ?? {});
+          expect(validate(xmlToJson(out ?? {}, `<r>a${char}b</r>`))).toBe(true);
+          expect(validate(xmlToJson(out ?? {}, '<r>a b</r>'))).toBe(false);
+        }
+      }
+      // CR LF stays a line end, which an attribute value turns into a space.
+      expect(run('<xs:element name="r" type="xs:string" fixed="a\r\nb"/>').schema?.const).toBe('a b');
+    });
+
+    it('write an xs:float fixed or default value beyond even the range of a double as INF or -INF', () => {
+      const infinite = 2 ** 128 - 2 ** 103;
+      const cases: [string, unknown, unknown[], unknown[]][] = [
+        ['<xs:element name="r" type="xs:float" fixed="1e400"/>', 'INF', ['INF', infinite, 1e39], [1, '-INF', 'NaN']],
+        ['<xs:element name="r" type="xs:float" fixed="-1E309"/>', '-INF', ['-INF', -infinite], [1, 'INF']],
+        [
+          `<xs:element name="r"><xs:complexType><xs:attribute name="a" type="xs:float" fixed="${'9'.repeat(401)}"/></xs:complexType></xs:element>`,
+          'INF',
+          [{ a: 'INF' }, { a: infinite }],
+          [{ a: 1 }, { a: '-INF' }],
+        ],
+      ];
+      for (const [body, value, valid, invalid] of cases) {
+        const { schema: out, problems } = run(body);
+        expect(codes(problems)).toEqual([]);
+        const validate = ajvFor(JSON.parse(JSON.stringify(out)) as JsonSchema);
+        expect(JSON.stringify(out)).toContain(`"default":"${String(value)}"`);
+        for (const json of valid) {
+          expect([body, json, validate(json)]).toEqual([body, json, true]);
+        }
+        for (const json of invalid) {
+          expect([body, json, validate(json)]).toEqual([body, json, false]);
+        }
+      }
+      expect(run('<xs:element name="r" type="xs:float" default="-1e400"/>').schema?.default).toBe('-INF');
+    });
+
+    it('compare the items of a list of xs:float with an enumeration or fixed value as floats, place by place', () => {
+      const list = '<xs:simpleType name="L"><xs:list itemType="xs:float"/></xs:simpleType>';
+      const enumerated = (...values: string[]) =>
+        `${list}<xs:element name="r"><xs:simpleType><xs:restriction base="L">${values.map((v) => `<xs:enumeration value="${v}"/>`).join('')}</xs:restriction></xs:simpleType></xs:element>`;
+      const accepts = (body: string, docs: Record<string, boolean>, attribute = false) => {
+        const { schema: out, problems } = run(body);
+        expect(codes(problems)).toEqual([]);
+        const schema = JSON.parse(JSON.stringify(out)) as JsonSchema;
+        const validate = ajvFor(schema);
+        for (const [text, want] of Object.entries(docs)) {
+          const json = xmlToJson(schema, attribute ? `<r a="${text}"/>` : `<r>${text}</r>`);
+          expect([text, validate(json)]).toEqual([text, want]);
+        }
+      };
+      accepts(enumerated('1 INF', '0.1 2'), {
+        '1 INF': true,
+        '1 1e39': true,
+        '0.1 2': true,
+        '0.10000000149011612 2': true,
+        '0.11 2': false,
+        '1 3.4028234e38': false,
+        '0.1 INF': false,
+        '2 0.1': false,
+        '1': false,
+        '1 INF 2': false,
+      });
+      // Two values whose items, combined across them, make no value.
+      accepts(enumerated('1 2', '3 4'), { '1 2': true, '3 4': true, '1 4': false, '3 2': false });
+      accepts(enumerated('-1e400 NaN'), { '-INF NaN': true, '-1e39 NaN': true, '-INF 1': false });
+      accepts(`${list}<xs:element name="r" type="L" fixed="0.1 INF"/>`, {
+        '0.10000000149011612 1e39': true,
+        '0.2 INF': false,
+      });
+      accepts(
+        `${list}<xs:element name="r"><xs:complexType><xs:attribute name="a" type="L" fixed="-1e39 0.1"/></xs:complexType></xs:element>`,
+        { '-INF 0.10000000149011612': true, '-INF 0.2': false },
+        true,
+      );
+      // The empty list is a value too: enumerated alone or beside others, written as white space only, or fixed.
+      accepts(enumerated(''), { '': true, '7': false });
+      accepts(enumerated('', '7'), { '': true, ' ': true, '7': true, '8': false, '7 7': false });
+      accepts(enumerated('  ', '1 2'), { '': true, '1 2': true, '1': false });
+      accepts(`${list}<xs:element name="r" type="L" fixed=""/>`, { '': true, '7': false });
+      accepts(
+        `${list}<xs:element name="r"><xs:complexType><xs:attribute name="a" type="L" fixed=""/></xs:complexType></xs:element>`,
+        { '': true, '0 0': false },
+        true,
+      );
+      // A further enumeration keeps a value of its base however written.
+      const further = run(
+        `${list}<xs:simpleType name="E"><xs:restriction base="L"><xs:enumeration value="0.1 2"/></xs:restriction></xs:simpleType>
+        <xs:element name="r"><xs:simpleType><xs:restriction base="E"><xs:enumeration value="0.10000000149011612 2.0"/></xs:restriction></xs:simpleType></xs:element>`,
+      );
+      expect(codes(further.problems)).toEqual([]);
+      // A list of xs:double keeps its enum.
+      const doubles = run(
+        '<xs:simpleType name="D"><xs:list itemType="xs:double"/></xs:simpleType><xs:element name="r"><xs:simpleType><xs:restriction base="D"><xs:enumeration value="0.1 2"/></xs:restriction></xs:simpleType></xs:element>',
+      );
+      expect(doubles.schema?.enum).toEqual([[0.1, 2]]);
+    });
+
+    it('convert 20,000 attributes or elements of one type in well under two seconds', () => {
+      const many = (n: number, item: (i: number) => string) => Array.from({ length: n }, (_, i) => item(i)).join('');
+      for (const content of [
+        many(20000, (i) => `<xs:attribute name="a${i}" type="xs:string"/>`),
+        `<xs:sequence>${many(20000, (i) => `<xs:element name="e${i}" type="xs:string"/>`)}</xs:sequence>`,
+      ]) {
+        const started = performance.now();
+        const { schema: out } = run(`<xs:element name="r"><xs:complexType>${content}</xs:complexType></xs:element>`);
+        expect(performance.now() - started).toBeLessThan(2000);
+        expect(Object.keys(out?.properties ?? {})).toHaveLength(20000);
+      }
+    });
+
+    it('write xs:float INF and -INF, also beyond the range of a float, as strings and the numbers rounding to them', () => {
+      // From 2^128 - 2^103 on, a number rounds to the float INF; the number below it to the largest float.
+      const infinite = 2 ** 128 - 2 ** 103;
+      const below = 3.4028235677973362e38;
+      const float = (facets: string) =>
+        `<xs:element name="r"><xs:simpleType><xs:restriction base="xs:float">${facets}</xs:restriction></xs:simpleType></xs:element>`;
+      const cases: [string, unknown[], unknown[]][] = [
+        ['<xs:element name="r" type="xs:float" fixed="1e39"/>', ['INF', infinite, 1e39], [below, 1, '-INF', 'NaN']],
+        ['<xs:element name="r" type="xs:float" fixed="-INF"/>', ['-INF', -infinite], [-below, 'INF']],
+        [
+          '<xs:element name="r"><xs:complexType><xs:attribute name="a" type="xs:float" fixed="INF"/></xs:complexType></xs:element>',
+          [{ a: 'INF' }, { a: infinite }, {}],
+          [{ a: below }, { a: '-INF' }],
+        ],
+        [float('<xs:enumeration value="1e39"/><xs:enumeration value="1"/>'), ['INF', infinite, 1], [below, 2, '-INF']],
+        [float('<xs:minInclusive value="INF"/>'), ['INF', infinite], [below, 1, '-INF', 'NaN']],
+        [float('<xs:maxExclusive value="INF"/>'), [below, 1, '-INF'], ['INF', infinite, 'NaN']],
+        [float('<xs:minExclusive value="-1e39"/>'), [-below, 1, 'INF'], ['-INF', -infinite]],
+        [float('<xs:maxInclusive value="-INF"/>'), ['-INF', -infinite], [-below, 'INF']],
+      ];
+      for (const [body, valid, invalid] of cases) {
+        const { schema: out, problems } = run(body);
+        expect(codes(problems)).toEqual([]);
+        const text = JSON.stringify(out);
+        expect(text).not.toContain('null');
+        const validate = ajvFor(JSON.parse(text) as JsonSchema);
+        for (const value of valid) {
+          expect([body, value, validate(value)]).toEqual([body, value, true]);
+        }
+        for (const value of invalid) {
+          expect([body, value, validate(value)]).toEqual([body, value, false]);
+        }
+      }
+      expect(run('<xs:element name="r" type="xs:float" default="-1e39"/>').schema?.default).toBe('-INF');
+      // On xs:double, INF is the string only.
+      const double = ajvFor(
+        run(
+          '<xs:element name="r"><xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="INF"/></xs:restriction></xs:simpleType></xs:element>',
+        ).schema ?? {},
+      );
+      expect([double('INF'), double(infinite)]).toEqual([true, false]);
+    });
+  });
+  describe('the limit of output entries', () => {
+    const xs = (body: string) => `<xs:schema ${XS}>${body}</xs:schema>`;
+    const derived = (name: string, own: string) =>
+      `<xs:complexType name="${name}"><xs:complexContent><xs:extension base="B"><xs:sequence><xs:element name="${own}" type="xs:int"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>`;
+    // The root holds x and y; D1 and D2 both repeat the inherited a: 2 + 3 + 3 entries, the largest map holds 3.
+    const files = {
+      'a.xsd': xs(
+        `<xs:complexType name="B"><xs:sequence><xs:element name="a" type="xs:int"/></xs:sequence></xs:complexType>
+        ${derived('D1', 'c')}${derived('D2', 'd')}
+        <xs:element name="r"><xs:complexType><xs:sequence><xs:element name="x" type="D1"/><xs:element name="y" type="D2"/></xs:sequence></xs:complexType></xs:element>`,
+      ),
+    };
+    const run = (maxOutputEntries?: number) =>
+      convert({ files, entry: 'a.xsd', limits: maxOutputEntries === undefined ? {} : { maxOutputEntries } });
+
+    it('count the keys of all properties maps together, an inherited property in each type that repeats it', () => {
+      const free = run();
+      expect(Object.keys(free.schema?.$defs ?? {})).toEqual(['D1', 'D2']);
+      for (const limit of [8, 9]) {
+        expect(run(limit)).toEqual(free);
+      }
+      for (const limit of [7, 3]) {
+        const over = run(limit);
+        expect(over.schema).toBeUndefined();
+        expect(over.problems.map((p) => [p.code, p.message])).toEqual([
+          ['resource-limit', `the schema exceeds the limit of ${limit} output entries (maxOutputEntries)`],
+        ]);
+      }
+    });
+
+    it('stop a chain of extensions whose types are all used early, and let a higher limit write it unchanged', () => {
+      const chain = (n: number) =>
+        xs(
+          `<xs:complexType name="T0"><xs:sequence><xs:element name="a0" type="xs:string"/></xs:sequence></xs:complexType>
+          ${Array.from({ length: n }, (_, i) => `<xs:complexType name="T${i + 1}"><xs:complexContent><xs:extension base="T${i}"><xs:sequence><xs:element name="a${i + 1}" type="xs:string"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>`).join('')}
+          <xs:element name="r"><xs:complexType><xs:sequence>${Array.from({ length: n + 1 }, (_, i) => `<xs:element name="u${i}" type="T${i}"/>`).join('')}</xs:sequence></xs:complexType></xs:element>`,
+        );
+      const small = { files: { 'a.xsd': chain(60) }, entry: 'a.xsd' };
+      const free = convert(small);
+      expect(free.problems).toEqual([]);
+      expect(convert({ ...small, limits: { maxOutputEntries: 1000 } }).schema).toBeUndefined();
+      const exact = outputEntries(free.schema);
+      expect(convert({ ...small, limits: { maxOutputEntries: exact } })).toEqual(free);
+      expect(convert({ ...small, limits: { maxOutputEntries: exact - 1 } }).schema).toBeUndefined();
+      // Under the default of 200000, a chain of 1000 such types stops early: before its 500000 properties and as many
+      // xsi:type branches are made.
+      const started = performance.now();
+      const big = convert({ files: { 'a.xsd': chain(1000) }, entry: 'a.xsd' });
+      expect(performance.now() - started).toBeLessThan(3000);
+      expect(big.schema).toBeUndefined();
+      expect(big.problems.map((p) => p.message)).toEqual([
+        'the schema exceeds the limit of 200000 output entries (maxOutputEntries)',
+      ]);
+    });
+
+    it('count the alternatives too, and nothing that is left out on the way', () => {
+      const exactly = (body: string) => {
+        const input = { files: { 'a.xsd': xs(body) }, entry: 'a.xsd', root: 'r' };
+        const free = convert(input);
+        const entries = outputEntries(free.schema);
+        expect(convert({ ...input, limits: { maxOutputEntries: entries } })).toEqual(free);
+        expect(convert({ ...input, limits: { maxOutputEntries: entries - 1 } }).problems.map((p) => p.code)).toEqual([
+          'resource-limit',
+        ]);
+        return entries;
+      };
+      // A group referred to twice declares its elements twice: the second particle is made and left out.
+      const group =
+        '<xs:group name="G"><xs:sequence><xs:element name="g"><xs:complexType><xs:sequence><xs:element name="h" type="xs:int"/></xs:sequence></xs:complexType></xs:element></xs:sequence></xs:group>';
+      expect(
+        exactly(
+          `${group}<xs:element name="r"><xs:complexType><xs:sequence><xs:group ref="G"/><xs:group ref="G"/></xs:sequence></xs:complexType></xs:element>`,
+        ),
+      ).toBe(2);
+      // The object of an abstract root type is made and left out for the types derived from it: 2 branches, each a
+      // $ref to a definition with #type, a and its own element.
+      const abstract = `<xs:complexType name="A" abstract="true"><xs:sequence><xs:element name="a" type="xs:int"/></xs:sequence></xs:complexType>
+        ${['B', 'C'].map((name) => `<xs:complexType name="${name}"><xs:complexContent><xs:extension base="A"><xs:sequence><xs:element name="${name.toLowerCase()}" type="xs:int"/></xs:sequence></xs:extension></xs:complexContent></xs:complexType>`).join('')}
+        <xs:element name="r" type="A"/>`;
+      expect(exactly(abstract)).toBe(2 + 3 + 3);
+      // A nillable simple element has a nil form it doesn't write; its anyOf of the value and null counts 2.
+      expect(
+        exactly(
+          '<xs:element name="r"><xs:complexType><xs:sequence><xs:element name="n" type="xs:int" nillable="true"/></xs:sequence></xs:complexType></xs:element>',
+        ),
+      ).toBe(3);
+    });
+
+    it('decide at the finished schema however deep the parts are that are built only to be dropped or relaxed', () => {
+      const exactly = (text: string) => {
+        const input = { files: { 'a.xsd': text }, entry: 'a.xsd', root: 'r' };
+        const free = convert(input);
+        const entries = outputEntries(free.schema);
+        expect(convert({ ...input, limits: { maxOutputEntries: entries } })).toEqual(free);
+        expect(convert({ ...input, limits: { maxOutputEntries: entries - 1 } }).schema).toBeUndefined();
+        return entries;
+      };
+      const g = `<xs:element name="g"><xs:complexType><xs:sequence>${Array.from({ length: 50 }, (_, i) => `<xs:element name="h${i}" type="xs:int"/>`).join('')}</xs:sequence></xs:complexType></xs:element>`;
+      // Each group refers twice to the one below: every further g joins the first one.
+      let groups = `<xs:group name="G1"><xs:sequence>${g}</xs:sequence></xs:group>`;
+      for (let d = 2; d <= 8; d++) {
+        groups += `<xs:group name="G${d}"><xs:sequence><xs:group ref="G${d - 1}"/><xs:group ref="G${d - 1}"/></xs:sequence></xs:group>`;
+      }
+      expect(
+        exactly(
+          xs(
+            `${groups}<xs:element name="r"><xs:complexType><xs:sequence><xs:group ref="G8"/><xs:group ref="G8"/></xs:sequence></xs:complexType></xs:element>`,
+          ),
+        ),
+      ).toBe(51);
+      // The same element written out again at every level of nested sequences, with no group to read once.
+      let nested = `<xs:sequence>${g}</xs:sequence>`;
+      for (let d = 2; d <= 8; d++) {
+        nested = `<xs:sequence>${g}${nested}</xs:sequence>`;
+      }
+      expect(exactly(xs(`<xs:element name="r"><xs:complexType>${nested}</xs:complexType></xs:element>`))).toBe(51);
+      // A group repeated on both sides of another element, at every level: each further occurrence joins the array of
+      // the first one.
+      let repeated = `<xs:group name="R1"><xs:sequence>${g}</xs:sequence></xs:group>`;
+      for (let d = 2; d <= 8; d++) {
+        repeated += `<xs:group name="R${d}"><xs:sequence><xs:group ref="R${d - 1}" maxOccurs="2"/><xs:element name="s${d}" type="xs:int"/><xs:group ref="R${d - 1}" maxOccurs="2"/></xs:sequence></xs:group>`;
+      }
+      expect(
+        exactly(
+          xs(
+            `${repeated}<xs:element name="r"><xs:complexType><xs:sequence><xs:group ref="R8" maxOccurs="2"/><xs:element name="z" type="xs:int"/><xs:group ref="R8" maxOccurs="2"/></xs:sequence></xs:complexType></xs:element>`,
+          ),
+        ),
+      ).toBe(67);
+      // The extension refers again to the choice of its base, inside an optional choice: joining e and d relaxes the
+      // choices made before, which then hold fewer entries than when they were made.
+      const choice =
+        '<xs:group name="C"><xs:choice><xs:element name="e" type="xs:int" maxOccurs="2"/><xs:element name="d" type="xs:int" minOccurs="0"/></xs:choice></xs:group>';
+      expect(
+        exactly(
+          xs(
+            `${choice}<xs:complexType name="B"><xs:sequence><xs:group ref="C"/></xs:sequence></xs:complexType>
+            <xs:complexType name="D"><xs:complexContent><xs:extension base="B"><xs:sequence><xs:choice minOccurs="0"><xs:group ref="C"/></xs:choice></xs:sequence></xs:extension></xs:complexContent></xs:complexType>
+            <xs:element name="r"><xs:complexType><xs:sequence><xs:element name="u" type="B"/></xs:sequence></xs:complexType></xs:element>`,
+          ),
+        ),
+      ).toBe(18);
+    });
+
+    it('leave out the entries of a choice that a later particle relaxes, and keep the order of those that stay', () => {
+      const run = (body: string) =>
+        convert({
+          files: { 'a.xsd': xs(`<xs:element name="r"><xs:complexType>${body}</xs:complexType></xs:element>`) },
+          entry: 'a.xsd',
+        });
+      const e = (i: number, extra = '') => `<xs:element name="e${i}" type="xs:int"${extra}/>`;
+      // e0 and e2 occur twice, but only within their own branch: their entries are noted, stay, and are written
+      // between those of e1 and e3 that were written at once.
+      const staying = run(
+        `<xs:choice><xs:sequence minOccurs="0">${e(0)}${e(0)}</xs:sequence>${e(1, ' minOccurs="0"')}<xs:sequence minOccurs="0">${e(2)}${e(2)}</xs:sequence>${e(3, ' minOccurs="0"')}</xs:choice>`,
+      );
+      expect(staying.schema?.anyOf).toEqual([
+        { properties: { e1: false, e2: false, e3: false } },
+        { properties: { e0: false, e2: false, e3: false } },
+        { properties: { e0: false, e1: false, e3: false } },
+        { properties: { e0: false, e1: false, e2: false } },
+      ]);
+      expect(staying.problems).toEqual([]);
+      // e0 and e2 occur again after the choice: their entries go, those of e1 and e3 stay.
+      const relaxed = run(
+        `<xs:sequence><xs:choice>${[0, 1, 2, 3].map((i) => e(i, ' minOccurs="0"')).join('')}</xs:choice><xs:element name="sep" type="xs:int"/>${e(0)}${e(2)}</xs:sequence>`,
+      );
+      expect(relaxed.schema?.anyOf).toEqual([
+        { properties: { e1: false, e3: false } },
+        { properties: { e3: false } },
+        { properties: { e1: false, e3: false } },
+        { properties: { e1: false } },
+      ]);
+      expect(relaxed.problems.map((p) => p.code)).toEqual(['approximated-occurrences', 'approximated-occurrences']);
+    });
+
+    it('relax a wide choice in time near linear, and stop a wide choice whose entries stay before it is built', () => {
+      const run = (body: string, limits?: { maxOutputEntries: number }) =>
+        convert({
+          files: { 'a.xsd': xs(`<xs:element name="r"><xs:complexType>${body}</xs:complexType></xs:element>`) },
+          entry: 'a.xsd',
+          ...(limits ? { limits } : {}),
+        });
+      const ids = (n: number) => Array.from({ length: n }, (_, i) => i);
+      const e = (i: number, extra = '') => `<xs:element name="e${i}" type="xs:int"${extra}/>`;
+      // A choice of 3,000 names, each given again after it: every entry of the choice goes.
+      for (const required of [false, true]) {
+        const started = performance.now();
+        const { schema, problems } = run(
+          `<xs:sequence><xs:choice>${ids(3000)
+            .map((i) => e(i, required ? '' : ' minOccurs="0"'))
+            .join('')}</xs:choice><xs:element name="sep" type="xs:int"/>${ids(3000)
+            .map((i) => e(i))
+            .join('')}</xs:sequence>`,
+        );
+        expect(performance.now() - started).toBeLessThan(2000);
+        expect(outputEntries(schema)).toBe(6001);
+        expect(problems.every((p) => p.code === 'approximated-occurrences')).toBe(true);
+      }
+      // Choices whose entries stay grow with the square of their width: 3,000 repeated groups, and names the planning
+      // takes for joined although they only occur twice within their own branch. Both stop near the limit.
+      const forms = [
+        (n: number) =>
+          `<xs:choice>${ids(n)
+            .map((i) => `<xs:sequence minOccurs="0" maxOccurs="2">${e(i)}</xs:sequence>`)
+            .join('')}</xs:choice>`,
+        (n: number) =>
+          `<xs:choice>${ids(n)
+            .map((i) => `<xs:sequence minOccurs="0">${e(i)}${e(i)}</xs:sequence>`)
+            .join('')}</xs:choice>`,
+      ];
+      for (const form of forms) {
+        const started = performance.now();
+        expect(run(form(3000), { maxOutputEntries: 50_000 }).problems.map((p) => p.code)).toEqual(['resource-limit']);
+        expect(performance.now() - started).toBeLessThan(2000);
+        // At a width that fits, the limit decides at the finished schema.
+        const free = run(form(30));
+        const entries = outputEntries(free.schema);
+        expect(run(form(30), { maxOutputEntries: entries })).toEqual(free);
+        expect(run(form(30), { maxOutputEntries: entries - 1 }).schema).toBeUndefined();
+      }
+    });
+
+    it('read a group referred to again in one object only once, also along different groups or repeated', () => {
+      const g =
+        '<xs:element name="g"><xs:complexType><xs:sequence><xs:element name="h" type="xs:int"/></xs:sequence></xs:complexType></xs:element>';
+      // A and B of each level both refer to A and B of the level below: 2^29 ways down to the first level.
+      let groups = `<xs:group name="A1"><xs:sequence>${g}</xs:sequence></xs:group><xs:group name="B1"><xs:sequence>${g}</xs:sequence></xs:group>`;
+      for (let d = 2; d <= 30; d++) {
+        for (const name of ['A', 'B']) {
+          groups += `<xs:group name="${name}${d}"><xs:sequence><xs:group ref="A${d - 1}"/><xs:group ref="B${d - 1}"/></xs:sequence></xs:group>`;
+        }
+      }
+      const started = performance.now();
+      const { schema: out, problems } = convert({
+        files: {
+          'a.xsd': xs(
+            `${groups}<xs:element name="r"><xs:complexType><xs:sequence><xs:group ref="A30"/></xs:sequence></xs:complexType></xs:element>`,
+          ),
+        },
+        entry: 'a.xsd',
+      });
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(problems).toEqual([]);
+      expect(out?.properties?.['g']).toMatchObject({ type: 'array', minItems: 2 ** 29, maxItems: 2 ** 29 });
+      // Each occurrence of a repeated group is an object of its own: groups that refer twice to the one below, repeated,
+      // reach the first level 2^29 times.
+      let repeated = `<xs:group name="R1"><xs:sequence>${g}</xs:sequence></xs:group>`;
+      for (let d = 2; d <= 30; d++) {
+        repeated += `<xs:group name="R${d}"><xs:sequence><xs:group ref="R${d - 1}" maxOccurs="2"/><xs:element name="s${d}" type="xs:int"/><xs:group ref="R${d - 1}" maxOccurs="2"/></xs:sequence></xs:group>`;
+      }
+      const again = performance.now();
+      const deep = convert({
+        files: {
+          'a.xsd': xs(
+            `${repeated}<xs:element name="r"><xs:complexType><xs:sequence><xs:group ref="R30" maxOccurs="2"/></xs:sequence></xs:complexType></xs:element>`,
+          ),
+        },
+        entry: 'a.xsd',
+      });
+      expect(performance.now() - again).toBeLessThan(1000);
+      expect(deep.problems).toEqual([]);
+      expect(deep.schema?.properties?.['#R30']).toMatchObject({ type: 'array', maxItems: 2 });
+    });
+
+    it('keep the place of each reference when it reads a group once: recursion, repetition and optional choices', () => {
+      const g = '<xs:element name="g" type="xs:int"/>';
+      const run = (body: string) => convert({ files: { 'a.xsd': xs(body) }, entry: 'a.xsd', root: 'r' });
+      // A group that contains itself, referred to directly and through another group: the error stays, once.
+      const recursion = run(
+        `<xs:group name="R"><xs:sequence>${g}<xs:group ref="R" minOccurs="0"/></xs:sequence></xs:group><xs:group name="S"><xs:sequence><xs:group ref="R"/></xs:sequence></xs:group>
+        <xs:element name="r"><xs:complexType><xs:sequence><xs:group ref="R"/><xs:group ref="S"/></xs:sequence></xs:complexType></xs:element>`,
+      );
+      expect(recursion.problems.map((p) => p.code)).toEqual(['circular-group']);
+      expect(recursion.schema?.properties?.['g']).toMatchObject({ minItems: 2, maxItems: 2 });
+      // Read plainly and repeated: the repeated reference is objects of their own.
+      const repeated = run(
+        `<xs:group name="G"><xs:sequence>${g}</xs:sequence></xs:group>
+        <xs:element name="r"><xs:complexType><xs:sequence><xs:group ref="G"/><xs:group ref="G" maxOccurs="3"/><xs:group ref="G"/></xs:sequence></xs:complexType></xs:element>`,
+      );
+      expect(Object.keys(repeated.schema?.properties ?? {})).toEqual(['g', '#G']);
+      expect(repeated.schema?.properties?.['g']).toMatchObject({ minItems: 2, maxItems: 2 });
+      // A choice group referred to optional and required gives each reference its own form.
+      const choice = `<xs:group name="C"><xs:choice>${g}<xs:element name="k" type="xs:int"/></xs:choice></xs:group>`;
+      for (const order of [
+        '<xs:group ref="C" minOccurs="0"/><xs:group ref="C"/>',
+        '<xs:group ref="C"/><xs:group ref="C" minOccurs="0"/>',
+      ]) {
+        const both = run(
+          `${choice}<xs:element name="r"><xs:complexType><xs:sequence>${order}</xs:sequence></xs:complexType></xs:element>`,
+        );
+        expect(both.schema?.properties?.['g']).toMatchObject({ type: 'array', maxItems: 2 });
+        expect(both.problems.map((p) => p.code)).toEqual(['approximated-occurrences', 'approximated-occurrences']);
+      }
+    });
+
+    it('apply to describeSchema and refuse a limit that is no positive safe integer', () => {
+      const over = describeSchema({ files, entry: 'a.xsd', limits: { maxOutputEntries: 7 } });
+      expect(over.schema).toBeUndefined();
+      expect(over.problems.map((p) => p.code)).toEqual(['resource-limit']);
+      expect(describeSchema({ files, entry: 'a.xsd', limits: { maxOutputEntries: 8 } }).schema).toEqual(run().schema);
+      for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53, '8']) {
+        expect(() => convert({ files, entry: 'a.xsd', limits: { maxOutputEntries: bad as number } })).toThrow(
+          'limits.maxOutputEntries must be a positive safe integer',
+        );
+      }
     });
   });
 });

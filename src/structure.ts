@@ -14,6 +14,7 @@ import { blockedBy, Polymorphism } from './polymorphism.js';
 import type { Problems } from './problems.js';
 import {
   attr,
+  booleanOf,
   clark,
   type Component,
   type QName,
@@ -239,6 +240,45 @@ interface Owner {
   problems?: number[];
 }
 
+/** The structure report would grow beyond `maxStructureSize`. */
+export class StructureLimitExceeded extends Error {
+  override name = 'StructureLimitExceeded';
+}
+
+/**
+ * The size of a value of the report in structure units: every value counts 1 (object, array, number, boolean or string),
+ * every field name of an object 1, and a string its length as well. `maxStructureSize` bounds the whole report in this
+ * unit. It is no measure of memory.
+ */
+export function structureSize(value: unknown): number {
+  if (typeof value === 'string') {
+    return 1 + value.length;
+  }
+  if (Array.isArray(value)) {
+    return value.reduce((sum: number, item) => sum + structureSize(item), 1);
+  }
+  if (value !== null && typeof value === 'object') {
+    let size = 1;
+    for (const item of Object.values(value)) {
+      size += 1 + structureSize(item);
+    }
+    return size;
+  }
+  return value === undefined ? 0 : 1;
+}
+
+/**
+ * The size of a node without its parts that are counted as they are made: the items of the arrays in `arrays` (the
+ * array itself counts) and the objects in `objects`.
+ */
+function ownSize(node: object, arrays: readonly string[], objects: readonly string[] = []): number {
+  let size = 1;
+  for (const [key, item] of Object.entries(node)) {
+    size += 1 + (arrays.includes(key) ? 1 : objects.includes(key) ? 0 : structureSize(item));
+  }
+  return size;
+}
+
 export class StructureBuilder {
   private readonly poly: Polymorphism;
   private readonly facets: FacetReader;
@@ -249,6 +289,12 @@ export class StructureBuilder {
   /** where the content of the type being read collects what it can't state for sure */
   private uncertainContent: Uncertainty[] | undefined;
   private readonly invalidOccurs = new Map<Element, Uncertainty>();
+  /** the structure units of the report made so far, for `maxStructureSize` */
+  private units = 0;
+  /** the nodes of the report counted, whose problem indexes count as `place` adds them */
+  private readonly inReport = new WeakSet<object>();
+  /** inside a pass that reads the attributes of a base again, which count only once they are taken over */
+  private quiet = 0;
 
   constructor(
     private readonly set: SchemaSet,
@@ -260,6 +306,42 @@ export class StructureBuilder {
   ) {
     this.poly = new Polymorphism(set);
     this.facets = new FacetReader(set);
+  }
+
+  /**
+   * Counts a particle before it joins the tree and before anything inside it is read; its children in `children`
+   * count by themselves. Stops when the report would grow beyond `maxStructureSize`.
+   */
+  private counted<T extends object>(node: T, children: readonly string[] = []): T {
+    this.inReport.add(node);
+    this.add(ownSize(node, children));
+    return node;
+  }
+
+  /** Counts an attribute or attribute wildcard as it joins a list of the report, unless a base is read again. */
+  private item<T extends object>(node: T): T {
+    if (this.quiet === 0) {
+      this.inReport.add(node);
+      this.add(structureSize(node));
+    }
+    return node;
+  }
+
+  /** Counts a type entry once it is complete: its particles and attributes count by themselves. */
+  private entryCounted(entry: ComplexType | SimpleType): void {
+    this.inReport.add(entry);
+    // the name in `types`, then the entry
+    this.add(1 + ownSize(entry, ['attributes', 'anyAttribute'], ['content']));
+  }
+
+  private add(units: number): void {
+    this.units += units;
+    const limit = this.set.limits.maxStructureSize;
+    if (this.units > limit) {
+      throw new StructureLimitExceeded(
+        `the structure report exceeds the limit of ${limit} structure units (maxStructureSize)`,
+      );
+    }
   }
 
   /** The structure of a root element. Problems the reading finds are already in the list; it adds none. */
@@ -282,12 +364,17 @@ export class StructureBuilder {
           const sub = this.element(member.node, member.doc, memberName, member.node, NO_CONTEXT, true);
           delete sub.key;
           delete sub.pointer;
-          return sub;
+          return this.counted(sub, ['substitutes']);
         });
       }
       tidy(node, ELEMENT_ORDER);
+      this.counted(node, ['substitutes']);
       const globals = this.globals();
-      return { root: node, types: this.types, globals, unplaced: this.place(length) };
+      // The report itself with its four fields, the object of the types, and the globals with their two lists.
+      this.add(1 + 4 + 1 + 1 + 2 + structureSize(globals.elements) + 1);
+      const unplaced = this.place(length);
+      this.add(structureSize(unplaced));
+      return { root: node, types: this.types, globals, unplaced };
     } finally {
       this.problems.truncate(length);
     }
@@ -298,8 +385,15 @@ export class StructureBuilder {
     const elements = [...this.set.components.element.keys()].sort();
     const attributes: AttributeNode[] = [];
     for (const [name, component] of [...this.set.components.attribute].sort(([a], [b]) => a.localeCompare(b))) {
-      const read = this.attribute(component.node, component.doc, NO_CONTEXT, undefined, true);
-      if (read?.kind === 'attribute' && read.name === name) attributes.push(read);
+      // Counted once it is taken.
+      this.quiet += 1;
+      let read: ReturnType<StructureBuilder['attribute']>;
+      try {
+        read = this.attribute(component.node, component.doc, NO_CONTEXT, undefined, true);
+      } finally {
+        this.quiet -= 1;
+      }
+      if (read?.kind === 'attribute' && read.name === name) attributes.push(this.item(read));
     }
     return { elements, attributes };
   }
@@ -331,6 +425,10 @@ export class StructureBuilder {
         return;
       }
       for (const owner of owners) {
+        if (this.inReport.has(owner)) {
+          // a new array under the name `problems`, then the index
+          this.add(owner.problems ? 1 : 3);
+        }
         (owner.problems ??= []).push(index);
       }
     });
@@ -582,6 +680,7 @@ export class StructureBuilder {
       entry.idType = idType;
     }
     tidy(entry, SIMPLE_ORDER);
+    this.entryCounted(entry);
   }
 
   private complexType(
@@ -616,7 +715,7 @@ export class StructureBuilder {
     // mixed on complexContent decides where it is written; otherwise mixed on complexType; otherwise false
     // (XML Schema 1.0, Structures 3.4.2).
     const contentMixed = complexContent && attr(complexContent, 'mixed');
-    entry.mixed = contentMixed !== undefined ? isTrue(contentMixed) : isTrue(attr(node, 'mixed'));
+    entry.mixed = booleanOf(contentMixed !== undefined ? contentMixed : attr(node, 'mixed')) === true;
     const uncertain: Uncertainty[] = [];
     if (derivation && (derivation.localName === 'extension' || derivation.localName === 'restriction')) {
       const base = this.set.resolveQName(derivation, attr(derivation, 'base') ?? '');
@@ -657,6 +756,7 @@ export class StructureBuilder {
       if (key !== undefined) {
         entry.text = { key, pointer: `/properties/${escape(key)}`, value };
       }
+      this.entryCounted(entry);
       return;
     }
     const outer = this.uncertainContent;
@@ -672,6 +772,7 @@ export class StructureBuilder {
     if (uncertain.length > 0) {
       entry.uncertain = uncertain;
     }
+    this.entryCounted(entry);
   }
 
   /** The occurrences of a particle; written values that aren't valid count as once and make the content uncertain. */
@@ -714,23 +815,21 @@ export class StructureBuilder {
     const baseName = this.set.resolveQName(derivation, attr(derivation, 'base') ?? '');
     const base = this.set.lookup('complexType', baseName);
     // The content of anyType: any elements, each validated where a declaration exists.
-    const anyContent = (): GroupNode => ({
-      kind: 'sequence',
-      min: 1,
-      max: 1,
-      particles: [
-        {
-          kind: 'any',
-          namespace: '##any',
-          processContents: 'lax',
-          targetNamespace: doc.targetNamespace,
-          source: this.source(derivation),
-          min: 0,
-          max: 'unbounded',
-        },
-      ],
-      source: this.source(derivation),
-    });
+    const anyContent = (): GroupNode => {
+      const any = this.counted<WildcardNode>({
+        kind: 'any',
+        namespace: '##any',
+        processContents: 'lax',
+        targetNamespace: doc.targetNamespace,
+        source: this.source(derivation),
+        min: 0,
+        max: 'unbounded',
+      });
+      return this.counted<GroupNode>(
+        { kind: 'sequence', min: 1, max: 1, particles: [any], source: this.source(derivation) },
+        ['particles'],
+      );
+    };
     const inherited = base
       ? this.contentOf(base.node, base.doc, context, seen)
       : baseName.ns === XS && baseName.local === 'anyType'
@@ -740,7 +839,10 @@ export class StructureBuilder {
     if (!inherited || !group) {
       return inherited ?? group;
     }
-    return { kind: 'sequence', min: 1, max: 1, particles: [inherited, group], source: this.source(derivation) };
+    return this.counted<GroupNode>(
+      { kind: 'sequence', min: 1, max: 1, particles: [inherited, group], source: this.source(derivation) },
+      ['particles'],
+    );
   }
 
   /** The facets of the text of a complex type with simple content. */
@@ -777,7 +879,7 @@ export class StructureBuilder {
       case 'any': {
         const node: WildcardNode = { kind: 'any', ...this.wildcard(child, doc), min, max: cardinality(max) };
         this.own(child, node);
-        return node;
+        return this.counted(node);
       }
       case 'sequence':
       case 'choice':
@@ -795,7 +897,7 @@ export class StructureBuilder {
       const form = attr(child, 'form');
       const qualified = form === undefined ? doc.elementQualified : form === 'qualified';
       const name = clark(qualified ? doc.targetNamespace : '', attr(child, 'name') ?? '');
-      return this.element(child, doc, name, child, context, false);
+      return this.counted(this.element(child, doc, name, child, context, false));
     }
     const head = this.set.lookup('element', this.set.resolveQName(child, ref));
     if (!head) {
@@ -808,7 +910,7 @@ export class StructureBuilder {
       const others = members.filter((member) => member.node !== head.node);
       if (others.length > 0) {
         node.substitutes = others.map((member) =>
-          this.element(member.node, member.doc, nameOf(member), child, context, true),
+          this.counted(this.element(member.node, member.doc, nameOf(member), child, context, true)),
         );
       }
       if (!members.some((member) => member.node === head.node)) {
@@ -816,7 +918,7 @@ export class StructureBuilder {
         delete node.pointer;
       }
     }
-    return node;
+    return this.counted(node, ['substitutes']);
   }
 
   private group(child: Element, doc: SchemaDocument, context: Context, seen: Set<Element>): GroupNode | undefined {
@@ -863,6 +965,7 @@ export class StructureBuilder {
         own = NO_CONTEXT;
       }
     }
+    this.counted(node, ['particles']);
     for (const particle of xsChildren(compositor)) {
       const described = this.particle(particle, compositorDoc, own, inner);
       if (described) {
@@ -906,8 +1009,15 @@ export class StructureBuilder {
     }
     const baseName = this.set.resolveQName(derivation, attr(derivation, 'base') ?? '');
     const base = this.set.lookup('complexType', baseName);
-    const inherited =
-      base && !seen.has(base.node) ? this.attributesOf(base.node, base.doc, context, seen, entry) : undefined;
+    // The base's attributes are read again here; those taken over count below, once overriding is settled.
+    this.quiet += 1;
+    let inherited: ReturnType<StructureBuilder['attributesOf']> | undefined;
+    try {
+      inherited =
+        base && !seen.has(base.node) ? this.attributesOf(base.node, base.doc, context, seen, entry) : undefined;
+    } finally {
+      this.quiet -= 1;
+    }
     const own = this.attributeList(derivation, doc, context, new Set(), entry);
     const byName = new Map<string, AttributeNode | { kind: 'prohibited'; name: string }>(
       (inherited?.attributes ?? []).map((a) => [a.name, a]),
@@ -916,8 +1026,23 @@ export class StructureBuilder {
       byName.set(attribute.name, attribute);
     }
     const attributes = [...byName.values()].filter((a): a is AttributeNode => a.kind === 'attribute');
+    const taken = new Set(inherited?.attributes ?? []);
+    for (const attribute of attributes) {
+      if (taken.has(attribute)) {
+        this.item(attribute);
+      }
+    }
+    // An attribute of the derivation that a later one of the same name replaces is not in the report.
+    const kept = new Set(attributes);
+    for (const attribute of own.attributes) {
+      if (attribute.kind === 'attribute' && !kept.has(attribute) && this.inReport.delete(attribute)) {
+        this.units -= structureSize(attribute);
+      }
+    }
     const wildcards =
-      derivation.localName === 'extension' ? [...(inherited?.wildcards ?? []), ...own.wildcards] : own.wildcards;
+      derivation.localName === 'extension'
+        ? [...(inherited?.wildcards ?? []).map((w) => this.item(w)), ...own.wildcards]
+        : own.wildcards;
     if (derivation.localName !== 'extension') {
       return { attributes, wildcards, effective: own.complete };
     }
@@ -965,14 +1090,19 @@ export class StructureBuilder {
           this.own(found.node, entry);
           const name = clark(found.doc.targetNamespace, attr(found.node, 'name') ?? '');
           const inner = this.attributeList(found.node, found.doc, context, new Set([...seen, found.node]), entry, name);
-          attributes.push(...inner.attributes);
-          wildcards.push(...inner.wildcards);
+          // One by one: a spread of a long list would exceed the number of arguments a call takes.
+          for (const attribute of inner.attributes) {
+            attributes.push(attribute);
+          }
+          for (const wildcard of inner.wildcards) {
+            wildcards.push(wildcard);
+          }
           groups.push(inner.complete);
         }
       } else if (child.localName === 'anyAttribute') {
         const wildcard = this.wildcard(child, doc);
         this.own(child, wildcard);
-        wildcards.push(wildcard);
+        wildcards.push(this.item(wildcard));
         local = wildcard;
       }
     }
@@ -1060,7 +1190,7 @@ export class StructureBuilder {
     tidy(out, ATTRIBUTE_ORDER);
     this.own(node, out);
     this.own(decl, out);
-    return out;
+    return this.item(out);
   }
 }
 

@@ -103,12 +103,34 @@ function numberForms(text: string, integer: boolean): string | undefined {
 }
 
 /**
+ * Where the numbers that round to the xs:float INF begin: halfway between the largest float and 2^128. A number right
+ * there rounds to 2^128, the even neighbour, which is INF.
+ */
+export const FLOAT_INFINITE = 2 ** 128 - 2 ** 103;
+
+/**
+ * INF or -INF for the text of a number beyond the range of xs:float: such a literal is the value INF or -INF (XML
+ * Schema Part 2, 3.2.4), which JSON writes as a string. Undefined for any other text.
+ */
+export function floatOverflow(text: string): 'INF' | '-INF' | undefined {
+  if (!/^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(text)) {
+    return undefined;
+  }
+  const float = Math.fround(Number(text));
+  return Number.isFinite(float) ? undefined : float > 0 ? 'INF' : '-INF';
+}
+
+/**
  * The JSON numbers that are the same xs:float as `value`: an xs:float is a 32-bit float (XML Schema Part 2, 3.2.4),
  * so every double that rounds to the same float is equal to it. The range ends halfway to the next floats; a number
  * right on an end rounds to the float with the even last bit, so the ends belong to the range when that is this one.
+ * For INF and -INF the range is every number from `FLOAT_INFINITE` on, or up to its negative.
  */
 export function float32Range(value: number): JsonSchema {
   const float = Math.fround(value);
+  if (!Number.isFinite(float)) {
+    return float > 0 ? { type: 'number', minimum: FLOAT_INFINITE } : { type: 'number', maximum: -FLOAT_INFINITE };
+  }
   const view = new DataView(new ArrayBuffer(4));
   view.setFloat32(0, float);
   const bits = view.getUint32(0);
@@ -135,4 +157,23 @@ export function float32Range(value: number): JsonSchema {
   return (bits & 1) === 0
     ? { type: 'number', minimum: low, maximum: high }
     : { type: 'number', exclusiveMinimum: low, exclusiveMaximum: high };
+}
+
+/**
+ * The JSON values that are the same xs:float as `value`, a number or one of the strings INF, -INF and NaN: the numbers
+ * that round to the float (see `float32Range`), and for INF and -INF also the string.
+ */
+export function floatValueSchema(value: number | string): JsonSchema {
+  if (value === 'INF' || value === '-INF') {
+    return { anyOf: [float32Range(value === 'INF' ? Infinity : -Infinity), { const: value }] };
+  }
+  return typeof value === 'number' ? float32Range(value) : { const: value };
+}
+
+/** The float a JSON value of an xs:float stands for, for comparing values: NaN for NaN, so compare keys, not floats. */
+export function floatKey(value: unknown): string {
+  if (typeof value === 'number') {
+    return String(Math.fround(value));
+  }
+  return String(value);
 }

@@ -4,14 +4,15 @@
 // docs/output.md describes the result.
 
 import type { Element } from '@xmldom/xmldom';
-import { attributeKey, elementKey, planKeys, renameObject } from './keys.js';
-import { float32Range } from './value-forms.js';
+import { attributeKey, elementKey, outputEntries, planKeys, renameObject } from './keys.js';
+import { floatOverflow, floatValueSchema } from './value-forms.js';
 import {
   ContentModel,
   emptyFragment,
   type Fragment,
   occurs,
   type Prop,
+  type Names,
   type Recorder,
   writeObject,
 } from './content-model.js';
@@ -21,6 +22,7 @@ import { blockedBy, Polymorphism, type TypeAlternative } from './polymorphism.js
 import type { Problems } from './problems.js';
 import {
   attr,
+  booleanOf,
   clark,
   type Component,
   documentation,
@@ -31,7 +33,14 @@ import {
   xsChild,
   xsChildren,
 } from './schema-set.js';
-import { type RestrictionStep, type SimpleTypeOptions, type SimpleTypeRef, SimpleTypes } from './simple-types.js';
+import {
+  floatTuple,
+  type RestrictionStep,
+  type SimpleTypeOptions,
+  type SimpleTypeRef,
+  SimpleTypes,
+} from './simple-types.js';
+import { xmlTrim } from './simple-values.js';
 
 const SCHEMA_2020_12 = 'https://json-schema.org/draft/2020-12/schema';
 // Complex type content that XML Schema 1.1 added; the converter reports and ignores it.
@@ -58,8 +67,33 @@ interface ElementDeclaration {
   global: boolean;
 }
 
+/** The schema would hold more output entries than `maxOutputEntries` allows. */
+export class OutputLimitExceeded extends Error {
+  override name = 'OutputLimitExceeded';
+}
+
 export class Emitter {
   private readonly simple: SimpleTypes;
+  /**
+   * Output entries (see `outputEntries`) counted while the schema is built, for an early stop at `maxOutputEntries`:
+   * the maps and alternatives of each object and constraint when it is made, and the types xsi:type may select before
+   * their branches are made. A map or array that appears in several places counts once here. Without the entries of
+   * properties built only to be dropped and of the parts of choices that relaxing will probably remove
+   * (`leftOutEntries`), this never exceeds what the finished schema holds; the finished schema is then counted exactly.
+   * Entries of choices that relaxing will remove are not made at all (see relax.ts), and those written at the end of
+   * an object are counted before each map grows.
+   */
+  private entries = 0;
+  /** the part of `entries` that belongs to properties built only to be dropped, or to parts relaxed later */
+  private leftOutEntries = 0;
+  /** for each such property or part, by its schema, how many entries it counted */
+  private readonly leftOutBy = new WeakMap<object, number>();
+  /** how many builds of such properties are open */
+  private leavingOut = 0;
+  /** the entries counted for each `properties` map and `anyOf` or `oneOf` array, 0 for an `allOf` already looked at */
+  private readonly counted = new WeakMap<object, number>();
+  /** inside a pass that reads the content of a type only for its property names, whose objects are not written */
+  private planning = 0;
   private readonly contentModel: ContentModel;
   private readonly definitions = new Definitions();
   /** the anonymous complex types of local elements being written, to stop one that contains itself */
@@ -93,7 +127,278 @@ export class Emitter {
       (node) => this.substitutes(node),
       options.textProperty,
       recorder,
+      {
+        written: (schema) => this.made(schema),
+        constraint: (schema, apart) => this.constraint(schema, apart),
+        settle: (part) => this.settle(part),
+        ensure: (count) => this.ensure(count),
+        grow: (map, count) => this.grow(map, count),
+        discarded: (schema) => this.discarded(schema),
+        moved: (from, to) => this.moved(from, to),
+        relaxed: (map) => this.relaxed(map),
+        leaveOut: () => this.leaveOut(),
+        leftOut: (mark, schema) => this.leftOut(mark, schema),
+      },
+      (node, doc, particle) => this.elementKeyOf(node, doc, particle),
     );
+  }
+
+  /**
+   * Reads content of which only a part is used, such as the names or the attributes: the objects made on the way are
+   * not written, so they count towards no limit. Definitions they refer to are queued and built later, outside.
+   */
+  private unwritten<T>(read: () => T): T {
+    this.planning += 1;
+    try {
+      return read();
+    } finally {
+      this.planning -= 1;
+    }
+  }
+
+  /** Starts building a property or object that will be dropped; what it counts is kept apart from then on. */
+  private leaveOut(): number {
+    this.leavingOut += 1;
+    return this.leftOutEntries;
+  }
+
+  /** Ends that build: what was counted since `mark` belongs to `schema` until `schema` is dropped. */
+  private leftOut(mark: number, schema: JsonSchema | undefined): void {
+    this.leavingOut -= 1;
+    if (schema !== undefined && this.leftOutEntries > mark) {
+      this.leftOutBy.set(schema, this.leftOutEntries - mark);
+    }
+  }
+
+  /** A property or object dropped after it was built: the entries counted in it are taken back. */
+  private discarded(schema: JsonSchema): void {
+    if (this.planning === 0) {
+      this.entries -= this.uncount(schema);
+      const apart = this.leftOutBy.get(schema);
+      if (apart !== undefined) {
+        this.leftOutBy.delete(schema);
+        this.leftOutEntries -= apart;
+      }
+    }
+  }
+
+  /**
+   * Counts a constraint like `made`. The entries of `apart`, parts that relaxing will probably remove, stay apart until
+   * they are removed or `settle` counts them.
+   */
+  private constraint(schema: JsonSchema, apart: readonly JsonSchema[] = []): void {
+    if (this.planning > 0) {
+      return;
+    }
+    const count = this.count(schema);
+    this.entries += count;
+    if (this.leavingOut > 0) {
+      this.leftOutEntries += count;
+    } else {
+      for (const part of apart) {
+        if (!this.leftOutBy.has(part)) {
+          const entries = this.countedIn(part);
+          this.leftOutBy.set(part, entries);
+          this.leftOutEntries += entries;
+        }
+      }
+    }
+    this.checkEntries();
+  }
+
+  /** A part kept apart is still there at the end of its object: its entries count. */
+  private settle(part: JsonSchema): void {
+    const apart = this.leftOutBy.get(part);
+    if (apart !== undefined) {
+      this.leftOutBy.delete(part);
+      this.leftOutEntries -= apart;
+      this.checkEntries();
+    }
+  }
+
+  /** Stops before `count` entries that will stay are made, if they don't fit. */
+  private ensure(count: number): void {
+    const limit = this.set.limits.maxOutputEntries;
+    if (this.planning === 0 && this.leavingOut === 0 && this.entries - this.leftOutEntries + count > limit) {
+      this.exceeded();
+    }
+  }
+
+  /** `count` entries about to be added to a counted map: checked first, then counted. */
+  private grow(map: object, count: number): void {
+    const before = this.counted.get(map);
+    if (before === undefined || this.planning > 0) {
+      return;
+    }
+    this.ensure(count);
+    this.counted.set(map, before + count);
+    this.add(count);
+  }
+
+  /** Counts the maps and alternatives of an object or constraint made, those not counted yet. */
+  private made(schema: JsonSchema): void {
+    if (this.planning === 0) {
+      this.add(this.count(schema));
+    }
+  }
+
+  /** Counts alternatives before they are made, so that many of them stop the conversion before they take memory. */
+  private reserve(count: number): void {
+    if (this.planning === 0) {
+      this.add(count);
+    }
+  }
+
+  private add(count: number): void {
+    this.entries += count;
+    if (this.leavingOut > 0) {
+      this.leftOutEntries += count;
+    }
+    this.checkEntries();
+  }
+
+  /** The name of the property of an element particle, without making the property. */
+  private elementKeyOf(node: Element, doc: SchemaDocument, particle?: Element): string | undefined {
+    const decl = particle ? this.globalElement(node, doc) : this.elementDeclaration(node, doc);
+    return decl && elementKey(decl.ns, decl.name);
+  }
+
+  /** A map replaced by one with renamed keys: its count moves along. */
+  private moved(from: object, to: object): void {
+    const before = this.counted.get(from);
+    if (before !== undefined) {
+      const after = Object.keys(to).length;
+      this.counted.delete(from);
+      this.counted.set(to, after);
+      this.entries += after - before;
+    }
+  }
+
+  /** A key removed from a counted map. */
+  private relaxed(map: object): void {
+    const before = this.counted.get(map);
+    if (before !== undefined) {
+      this.counted.set(map, before - 1);
+      this.entries -= 1;
+    }
+  }
+
+  /** The entries of the maps and alternatives in a schema not counted yet, which are counted now. */
+  private count(node: JsonSchema | boolean | undefined): number {
+    if (typeof node !== 'object') {
+      return 0;
+    }
+    let entries = 0;
+    const map = node.properties;
+    if (map && !this.counted.has(map)) {
+      const values = Object.values(map);
+      this.counted.set(map, values.length);
+      entries += values.length;
+      for (const value of values) {
+        entries += this.count(value);
+      }
+    }
+    for (const list of [node.anyOf, node.oneOf]) {
+      if (list && !this.counted.has(list)) {
+        this.counted.set(list, list.length);
+        entries += list.length;
+        for (const part of list) {
+          entries += this.count(part);
+        }
+      }
+    }
+    if (node.allOf && !this.counted.has(node.allOf)) {
+      this.counted.set(node.allOf, 0);
+      for (const part of node.allOf) {
+        entries += this.count(part);
+      }
+    }
+    for (const part of [
+      ...(node.prefixItems ?? []),
+      node.items,
+      node.not,
+      node.additionalProperties,
+      node.propertyNames,
+    ]) {
+      entries += this.count(part);
+    }
+    for (const part of Object.values(node.dependentSchemas ?? {})) {
+      entries += this.count(part);
+    }
+    return entries;
+  }
+
+  /** The entries counted in a schema left out, which no longer count. */
+  private uncount(node: JsonSchema | boolean | undefined): number {
+    if (typeof node !== 'object') {
+      return 0;
+    }
+    let entries = 0;
+    for (const holder of [node.properties, node.anyOf, node.oneOf, node.allOf]) {
+      const counted = holder && this.counted.get(holder);
+      if (holder && counted !== undefined) {
+        this.counted.delete(holder);
+        entries += counted;
+      }
+    }
+    const parts = [
+      ...Object.values(node.properties ?? {}),
+      ...(node.anyOf ?? []),
+      ...(node.oneOf ?? []),
+      ...(node.allOf ?? []),
+      ...(node.prefixItems ?? []),
+      node.items,
+      node.not,
+      node.additionalProperties,
+      node.propertyNames,
+      ...Object.values(node.dependentSchemas ?? {}),
+    ];
+    for (const part of parts) {
+      entries += this.uncount(part);
+    }
+    return entries;
+  }
+
+  /** The entries counted so far in a schema, as `uncount` would take them back. */
+  private countedIn(node: JsonSchema | boolean | undefined): number {
+    if (typeof node !== 'object') {
+      return 0;
+    }
+    let entries = 0;
+    for (const holder of [node.properties, node.anyOf, node.oneOf, node.allOf]) {
+      entries += (holder && this.counted.get(holder)) ?? 0;
+    }
+    const parts = [
+      ...Object.values(node.properties ?? {}),
+      ...(node.anyOf ?? []),
+      ...(node.oneOf ?? []),
+      ...(node.allOf ?? []),
+      ...(node.prefixItems ?? []),
+      node.items,
+      node.not,
+      node.additionalProperties,
+      node.propertyNames,
+      ...Object.values(node.dependentSchemas ?? {}),
+    ];
+    for (const part of parts) {
+      entries += this.countedIn(part);
+    }
+    return entries;
+  }
+
+  /**
+   * Stops as soon as the schema certainly holds more output entries than `maxOutputEntries`: the entries counted,
+   * without those of properties built only to be dropped and of parts of choices that relaxing will probably remove.
+   */
+  private checkEntries(): void {
+    if (this.entries - this.leftOutEntries > this.set.limits.maxOutputEntries) {
+      this.exceeded();
+    }
+  }
+
+  private exceeded(): never {
+    const limit = this.set.limits.maxOutputEntries;
+    throw new OutputLimitExceeded(`the schema exceeds the limit of ${limit} output entries (maxOutputEntries)`);
   }
 
   /** The name in `$defs` of a component: kind `type`, `element` (an anonymous type) or `local`; see Definitions. */
@@ -121,15 +426,17 @@ export class Emitter {
     }
     const content = this.nillable(
       decl,
-      named && typeName
-        ? this.typeAlternatives(
-            decl,
-            typeName,
-            this.withValues(this.complexType(named.node, named.doc), root.node, undefined, this.textType(named.node)),
-          )
-        : this.declarationType(decl, true),
+      named && typeName ? this.rootTypeAlternatives(decl, typeName, named, root) : this.declarationType(decl, true),
     );
     const defs = this.definitions.buildAll();
+    // The running count only stops early; the exact count of the finished schema decides.
+    let total = outputEntries(content);
+    for (const definition of defs.values()) {
+      total += outputEntries(definition);
+    }
+    if (total > this.set.limits.maxOutputEntries) {
+      this.exceeded();
+    }
     const schema: JsonSchema = { $schema: SCHEMA_2020_12 };
     const description = decl.docs || content.description;
     if (description) {
@@ -360,6 +667,24 @@ export class Emitter {
   }
 
   /**
+   * The root's named type in place, with the types xsi:type may select. The own object of an abstract type is dropped
+   * when types derive from it, so its entries are kept apart; if none do, they only stay out of the early stop.
+   */
+  private rootTypeAlternatives(decl: ElementDeclaration, type: QName, named: Component, root: Component): JsonSchema {
+    const abstract = isTrue(attr(named.node, 'abstract'));
+    const mark = abstract ? this.leaveOut() : 0;
+    let own: JsonSchema | undefined;
+    try {
+      own = this.withValues(this.complexType(named.node, named.doc), root.node, undefined, this.textType(named.node));
+    } finally {
+      if (abstract) {
+        this.leftOut(mark, own);
+      }
+    }
+    return this.typeAlternatives(decl, type, own);
+  }
+
+  /**
    * The schema of an element of a named or built-in type, with the types xsi:type may select. A complex type is an
    * `anyOf` of its own definition, unless it is abstract, and the definitions of its derived types, which require
    * `#type`; without derived types it stays as it is. A simple type stays as it is.
@@ -384,8 +709,17 @@ export class Emitter {
         }
         return schema;
       }
+      // Each use of a type lists the types derived from it: counted before they are made.
+      const count = others.length + (abstract ? 0 : 1);
+      this.reserve(count);
       const branches = others.map((alternative) => this.typeBranch(alternative, decl.node));
-      return { anyOf: abstract ? branches : [schema, ...branches] };
+      // An abstract type has no object of its own; the one made for it is left out.
+      if (abstract) {
+        this.discarded(schema);
+      }
+      const anyOf = abstract ? branches : [schema, ...branches];
+      this.counted.set(anyOf, count);
+      return { anyOf };
     }
     // A simple type has no object form: xsi:type may only name the declared type, which `xml.type` records.
     return schema;
@@ -474,7 +808,12 @@ export class Emitter {
             this.set.at(node),
           );
         }
-        values[keyword] = value.value;
+        // A default beyond the range of xs:float is INF or -INF; a fixed one is handled by fixedByValue.
+        const special =
+          keyword === 'default' && typeof value.value === 'number' && this.simple.isFloat(type, node)
+            ? floatOverflow(xmlTrim(lexical))
+            : undefined;
+        values[keyword] = special ?? value.value;
         if (keyword === 'const') {
           this.fixedByValue(values, type, lexical, node);
         }
@@ -486,7 +825,11 @@ export class Emitter {
     const key = this.options.textProperty;
     const text = schema.properties?.[key];
     const textSchema = withPattern(withValuesOf(typeof text === 'object' ? text : {}, values), values.pattern);
-    return { ...schema, type: 'object', properties: { ...schema.properties, [key]: textSchema } };
+    const properties = { ...schema.properties, [key]: textSchema };
+    if (schema.properties) {
+      this.moved(schema.properties, properties);
+    }
+    return { ...schema, type: 'object', properties };
   }
 
   /**
@@ -495,9 +838,19 @@ export class Emitter {
    * or double member of a union), the value is only a `default`.
    */
   private fixedByValue(values: JsonSchema, type: SimpleTypeRef, lexical: string, node: Element): void {
-    // An xs:float is a 32-bit float: every number that rounds to the fixed float is that value.
-    if (typeof values.const === 'number' && this.simple.isFloat(type, node)) {
-      values.allOf = [float32Range(values.const)];
+    // An xs:float is a 32-bit float: every number that rounds to the fixed float is that value. INF and -INF, written
+    // so or beyond the range of a float, are their strings and the numbers that round to them.
+    const infinite = values.const === 'INF' || values.const === '-INF';
+    if ((typeof values.const === 'number' || infinite) && this.simple.isFloat(type, node)) {
+      const value = floatOverflow(xmlTrim(lexical)) ?? (values.const as number | string);
+      values.allOf = [floatValueSchema(value)];
+      values.default = value;
+      delete values.const;
+      return;
+    }
+    // A list of xs:float compares item by item in the same way.
+    if (Array.isArray(values.const) && this.simple.isFloatList(type, node)) {
+      values.allOf = [floatTuple(values.const)];
       values.default = values.const;
       delete values.const;
       return;
@@ -541,6 +894,7 @@ export class Emitter {
     if (alternatives.length === 0) {
       const form = this.nilForm(decl, attributes, anyAttribute, plan);
       if (form && (attributes.length > 0 || anyAttribute)) {
+        this.made(form);
         forms.push(form);
       }
     }
@@ -552,6 +906,7 @@ export class Emitter {
       const typePlan = complex ? this.keyPlanOf(complex.node, complex.doc) : plan;
       const form = this.nilForm(decl, typed.attributes, typed.anyAttribute, typePlan, alternative.id, !own);
       if (form) {
+        this.made(form);
         forms.push(form);
       }
     }
@@ -604,7 +959,7 @@ export class Emitter {
     } else if (this.options.xml) {
       form.xml = { anyAttribute: true };
     }
-    renameObject(form, plan, this.options.xml);
+    renameObject(form, plan, this.options.xml, (from, to) => this.moved(from, to));
     return form;
   }
 
@@ -623,7 +978,7 @@ export class Emitter {
       // A type that holds a nillable element of its own type asks again while its content is read: the keys of
       // that inner pass are not used.
       this.keyPlans.set(node, new Map());
-      const { fragment, attributes } = this.content(node, doc);
+      const { fragment, attributes } = this.unwritten(() => this.content(node, doc));
       const keys = [...attributes.filter((a) => !a.prohibited).map((a) => a.key), ...fragment.props.map((p) => p.key)];
       plan = planKeys(keys, this.options.textProperty);
       this.keyPlans.set(node, plan);
@@ -828,7 +1183,9 @@ export class Emitter {
     if (derivation) {
       this.checkXsd11Content(derivation);
     }
-    if (isTrue(attr(node, 'mixed')) || (complexContent && isTrue(attr(complexContent, 'mixed')))) {
+    // mixed on complexContent decides where it is written, otherwise mixed on complexType (XML Schema 1.0, 3.4.2).
+    const contentMixed = complexContent && attr(complexContent, 'mixed');
+    if (booleanOf(contentMixed !== undefined ? contentMixed : attr(node, 'mixed')) === true) {
       return this.mixedContent(node, derivation, doc, seen);
     }
     if (derivation) {
@@ -847,7 +1204,13 @@ export class Emitter {
         this.contentModel.merge(fragment, inherited.fragment, true);
         attributes = inherited.attributes;
       } else if (base) {
-        attributes = this.content(base.node, base.doc, seen).attributes;
+        // Only its attributes are used: its objects are not written.
+        this.planning += 1;
+        try {
+          attributes = this.content(base.node, base.doc, seen).attributes;
+        } finally {
+          this.planning -= 1;
+        }
       }
       this.contentModel.compositor(derivation, doc, fragment);
       return { fragment, attributes: overrideAttributes(attributes, this.attributes(derivation, doc, fragment)) };
@@ -882,7 +1245,14 @@ export class Emitter {
       const base = this.set.lookup('complexType', baseName);
       let inherited: AttributeProp[] = [];
       if (base) {
-        const content = this.content(base.node, base.doc, seen);
+        // Only its attributes are used: its objects are not written.
+        this.planning += 1;
+        let content: ReturnType<Emitter['content']>;
+        try {
+          content = this.content(base.node, base.doc, seen);
+        } finally {
+          this.planning -= 1;
+        }
         inherited = content.attributes;
         fragment.anyAttribute = derivation.localName === 'extension' && content.fragment.anyAttribute === true;
       } else if (!(baseName.ns === XS && baseName.local === 'anyType')) {
@@ -1015,9 +1385,38 @@ export class Emitter {
     }
   }
 
+  /**
+   * Starts reading the content of the object of a complex type, with the names its own and its inherited particles
+   * give; see `Names`.
+   */
+  private beginObject(node: Element, doc: SchemaDocument): void {
+    const names: Names = new Map();
+    const seen = new Set<Element>();
+    let type: { node: Element; doc: SchemaDocument } | undefined = { node, doc };
+    while (type && !seen.has(type.node)) {
+      seen.add(type.node);
+      const derivation: Element | undefined = xsChildren(xsChild(type.node, 'complexContent') ?? type.node)[0];
+      const extension: Element | undefined = derivation?.localName === 'extension' ? derivation : undefined;
+      const owner =
+        derivation && ['extension', 'restriction'].includes(derivation.localName ?? '') ? derivation : type.node;
+      this.contentModel.modelNames(owner, type.doc, names);
+      type = extension
+        ? this.set.lookup('complexType', this.set.resolveQName(extension, attr(extension, 'base') ?? ''))
+        : undefined;
+    }
+    this.contentModel.beginObject(names);
+  }
+
   /** The object schema of a complex type: attributes first, then the properties of the content model. */
   private complexType(node: Element, doc: SchemaDocument): JsonSchema {
-    const { fragment, attributes } = this.content(node, doc);
+    this.beginObject(node, doc);
+    let content: ReturnType<Emitter['content']>;
+    try {
+      content = this.content(node, doc);
+    } finally {
+      this.contentModel.endObject();
+    }
+    const { fragment, attributes } = content;
     const schema: JsonSchema = {};
     const docs = documentation(node);
     if (docs) {
@@ -1038,7 +1437,8 @@ export class Emitter {
     for (const prop of fragment.props) {
       properties[prop.key] = prop.schema;
     }
-    required.push(...fragment.required.filter((key) => !required.includes(key)));
+    const attributeRequired = new Set(required);
+    required.push(...fragment.required.filter((key) => !attributeRequired.has(key)));
     // xsi:type may name a named type, also the declared one: its objects may say so in `#type`.
     const name = attr(node, 'name');
     if (name !== undefined && Object.hasOwn(properties, '#type')) {
@@ -1054,9 +1454,10 @@ export class Emitter {
         : properties;
     writeObject(schema, typed, required, fragment, this.options.xml);
     const plan = planKeys(Object.keys(typed), this.options.textProperty);
-    for (const clash of renameObject(schema, plan, this.options.xml)) {
+    for (const clash of renameObject(schema, plan, this.options.xml, (from, to) => this.moved(from, to))) {
       this.problems.error('duplicate-name', `${clash} is the name of two properties`, this.set.at(node));
     }
+    this.made(schema);
     this.recorder?.object(node, plan, fragment.groupKeys);
     return schema;
   }

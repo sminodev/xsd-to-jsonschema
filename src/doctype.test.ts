@@ -67,7 +67,7 @@ describe('DOCTYPE declarations in schema documents', () => {
       'allowed-comment-starts-with-hyphen',
     ];
     expect(files.filter((file) => !known.some((prefix) => file.startsWith(prefix)))).toEqual([]);
-    expect(files).toHaveLength(25);
+    expect(files).toHaveLength(28);
   });
 
   it('read a large body in linear time: 4 MiB of entity references take well under a second', () => {

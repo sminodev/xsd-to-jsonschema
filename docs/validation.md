@@ -70,7 +70,9 @@ Because `xml` is metadata rather than a validation keyword, register it as an an
 
 The converter writes the branches of unions flat, so Ajv with its default settings compiles long chains of unions
 quickly. A chain of more than about 250 unions that each restrict the next with their own facets still refers from
-definition to definition, deeper than Ajv's stack allows; Ajv then throws a `RangeError` while compiling.
+definition to definition, deeper than Ajv's stack allows; Ajv then throws a `RangeError` while compiling. The same
+happens with repeated choices (`maxOccurs` greater than 1) nested about 200 deep, each an array of objects inside the
+next.
 
 `ajv-formats` validates formats emitted with `dateTime: 'format'`. For the difference from the default `pattern`
 mode, see [Dates and times](output.md#dates-and-times).

@@ -242,6 +242,8 @@ export interface XmlToJsonOptions {
 export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOptions = {}): Json {
   const textProperty = options.textProperty ?? 'value';
   const doc = new DOMParser({
+    // XML 1.0 line ends only (2.11): U+0085, U+2028 and U+2029 stay characters, as in the schema loader.
+    normalizeLineEndings: (source: string) => source.replace(/\r\n?/g, '\n'),
     onError: (level, message) => {
       if (level !== 'warning') {
         throw new Error(message);

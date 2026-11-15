@@ -4,7 +4,16 @@ import { applyNumericFacets, type NumericFacets } from './numeric-facets.js';
 import { type At, Problems } from './problems.js';
 import { attr, type QName, type SchemaSet, XS, xsChild, xsChildren } from './schema-set.js';
 import { enumSchema, lexicalToJson, primaryType, violation, xmlTrim } from './simple-values.js';
-import { equalForms, escapePattern, float32Range, hasUnlistedForms } from './value-forms.js';
+import {
+  equalForms,
+  escapePattern,
+  FLOAT_INFINITE,
+  float32Range,
+  floatKey,
+  floatOverflow,
+  floatValueSchema,
+  hasUnlistedForms,
+} from './value-forms.js';
 import { combinePatterns, translateBody, XsdRegexError } from './xsd-regex.js';
 
 export { lexicalToJson } from './simple-values.js';
@@ -80,12 +89,10 @@ const STRINGS = ['string', 'normalizedString', 'token', 'anyURI', 'NOTATION'];
 const NAME_TYPES = ['Name', 'NCName', 'ID', 'IDREF', 'ENTITY', 'NMTOKEN', 'QName'];
 /**
  * A bound of xs:float on JSON numbers: an xs:float compares as a 32-bit float, so the bound moves to the end of the
- * range of numbers that round to its float (see `float32Range`), included where that number still rounds to it.
+ * range of numbers that round to its float (see `float32Range`), included where that number still rounds to it. The
+ * float is finite; a bound beyond its range goes to `infiniteBound`.
  */
 function floatBound(value: number, lower: boolean, exclusive: boolean): { value: number; exclusive: boolean } {
-  if (!Number.isFinite(Math.fround(value))) {
-    return { value, exclusive };
-  }
   const range = float32Range(value);
   const even = range.minimum !== undefined;
   const low = range.minimum ?? range.exclusiveMinimum ?? value;
@@ -97,6 +104,26 @@ function floatBound(value: number, lower: boolean, exclusive: boolean): { value:
   // float(v) <= F: up to the high end; float(v) < F: below the low end.
   return exclusive ? { value: low, exclusive: even } : { value: high, exclusive: !even };
 }
+
+/**
+ * The bound on JSON numbers of an xs:float bound of INF or -INF, the numbers from `FLOAT_INFINITE` on rounding to INF:
+ * at least INF or below INF, at most -INF or above -INF. Undefined where the bound admits every number (at most INF,
+ * at least -INF) or none (above INF, below -INF).
+ */
+function infiniteBound(
+  value: 'INF' | '-INF',
+  lower: boolean,
+  exclusive: boolean,
+): { value: number; exclusive: boolean } | undefined {
+  if (value === 'INF') {
+    return lower === exclusive ? undefined : { value: FLOAT_INFINITE, exclusive };
+  }
+  return lower === exclusive ? { value: -FLOAT_INFINITE, exclusive } : undefined;
+}
+
+/** Infinity and -Infinity for the strings INF and -INF among `values`, for the ranges of numbers that are them. */
+const infinities = (values: string[]): number[] =>
+  values.filter((v) => v === 'INF' || v === '-INF').map((v) => (v === 'INF' ? Infinity : -Infinity));
 
 /** The values of xs:float and xs:double that JSON numbers can't hold, written as strings. */
 const SPECIAL_VALUES = ['INF', '-INF', 'NaN'];
@@ -721,6 +748,27 @@ export class SimpleTypes {
             }
             const lower = facet.localName.startsWith('min');
             const exclusive = facet.localName.endsWith('Exclusive');
+            const text = xmlTrim(value);
+            const overflow =
+              derivation.builtin !== 'float'
+                ? undefined
+                : text === 'INF' || text === '-INF'
+                  ? text
+                  : floatOverflow(text);
+            if (overflow !== undefined) {
+              // A bound of INF or -INF on xs:float, written so or beyond the range of a float. The numbers that round
+              // to it bound the numbers where it is a minimum of INF or a maximum of -INF, inclusive, or the other way
+              // round, exclusive; otherwise it admits every number or none, and only the strings INF, -INF and NaN
+              // tell.
+              const limit = infiniteBound(overflow, lower, exclusive);
+              if (limit === undefined) {
+                specials.bound(overflow, lower, exclusive);
+              } else {
+                specials.bound(String(limit.value), lower, exclusive);
+                (lower ? numeric.lower : numeric.upper).push(limit);
+              }
+              break;
+            }
             if (floating && specials.bound(xmlTrim(value), lower, exclusive)) {
               break;
             }
@@ -846,15 +894,20 @@ export class SimpleTypes {
     let allowed = specials.allowed;
     if (enumeration !== undefined) {
       const named = enumeration.map(xmlTrim);
-      allowed = allowed.filter((value) => named.includes(value));
-      for (const value of named.filter((v) => SPECIAL_VALUES.includes(v) && !allowed.includes(v))) {
-        this.problems.warning(
-          'unreachable-enumeration',
-          `enumeration value ${value} is left out: another facet rules it out`,
-          this.at(enumAt),
-        );
-      }
-      const finite = enumeration.filter((lexical) => !SPECIAL_VALUES.includes(xmlTrim(lexical)));
+      // An xs:float value beyond the range of a float is INF or -INF: it counts with them, not with the numbers.
+      const values = float ? named.map((value) => floatOverflow(value) ?? value) : named;
+      allowed = allowed.filter((value) => values.includes(value));
+      named.forEach((lexical, i) => {
+        const value = values[i] as string;
+        if (SPECIAL_VALUES.includes(value) && !allowed.includes(value)) {
+          this.problems.warning(
+            'unreachable-enumeration',
+            `enumeration value ${lexical} is left out: another facet rules it out`,
+            this.at(enumAt),
+          );
+        }
+      });
+      const finite = enumeration.filter((_, i) => !SPECIAL_VALUES.includes(values[i] as string));
       numeric =
         numeric && finite.length > 0
           ? enumSchema(numbers, finite, this.problems, this.at(enumAt), ['number', 'string'])
@@ -862,9 +915,11 @@ export class SimpleTypes {
       if (numeric?.not) {
         numeric = undefined;
       }
-      // xs:float values are equal in the 32-bit value space: each value is the range of numbers that round to it.
-      if (float && numeric?.enum) {
-        const floats = [...new Set(numeric.enum.map((v) => Math.fround(v as number)))];
+      // xs:float values are equal in the 32-bit value space: each value is the range of numbers that round to it,
+      // INF and -INF included, besides their strings.
+      const infinite = float ? infinities(allowed) : [];
+      if (float && (numeric?.enum || infinite.length > 0)) {
+        const floats = [...new Set((numeric?.enum ?? []).map((v) => Math.fround(v as number))), ...infinite];
         const ranges = floats.map(float32Range);
         const branches = allowed.length > 0 ? [...ranges, { enum: allowed }] : ranges;
         return branches.length === 1 ? (branches[0] ?? { not: {} }) : { anyOf: branches };
@@ -929,6 +984,12 @@ export class SimpleTypes {
   isFloat(type: SimpleTypeRef, from?: Element): boolean {
     const derivation = this.derive(type, from);
     return derivation.variety === 'atomic' && derivation.builtin === 'float';
+  }
+
+  /** Whether a simple type is a list of xs:float, or of a type derived from it by restriction. */
+  isFloatList(type: SimpleTypeRef, from?: Element): boolean {
+    const derivation = this.derive(type, from);
+    return derivation.list !== undefined && this.isFloat(derivation.list.item, derivation.list.node);
   }
 
   /**
@@ -1174,6 +1235,9 @@ export class SimpleTypes {
     const items: JsonSchema = { ...item };
     delete items.description;
     const checkItems = this.checker() === this ? items : this.checker().schema(list.item, list.node);
+    // Items of xs:float compare as 32-bit floats: lists with the same floats are the same value however written.
+    const float = this.isFloat(list.item, list.node);
+    const key = (value: unknown[]): string => JSON.stringify(float ? value.map(floatKey) : value);
     let min = list.nonEmpty ? 1 : 0;
     let max = Infinity;
     let enumeration: { values: unknown[][]; at: Element } | undefined;
@@ -1229,9 +1293,9 @@ export class SimpleTypes {
       }
       if (values.length > 0) {
         // A further enumeration may only keep values of the one before.
-        const allowed = enumeration && new Set(enumeration.values.map((v) => JSON.stringify(v)));
+        const allowed = enumeration && new Set(enumeration.values.map(key));
         const kept = values.filter((v) => {
-          if (allowed && !allowed.has(JSON.stringify(v))) {
+          if (allowed && !allowed.has(key(v))) {
             this.problems.error(
               'invalid-facet',
               `enumeration value ${JSON.stringify(v)} is not in the base enumeration`,
@@ -1268,11 +1332,16 @@ export class SimpleTypes {
         }
         return !reason;
       });
-      const distinct = kept.filter((v, i) => kept.findIndex((w) => JSON.stringify(w) === JSON.stringify(v)) === i);
-      if (distinct.length > 0) {
-        schema.enum = distinct;
-      } else {
+      const keys = kept.map(key);
+      const distinct = kept.filter((_, i) => keys.indexOf(keys[i] as string) === i);
+      if (distinct.length === 0) {
         schema.not = {};
+      } else if (float) {
+        // Each value is one list of floats, item by item; values that overlap make an anyOf, not a oneOf.
+        const tuples = distinct.map(floatTuple);
+        Object.assign(schema, tuples.length === 1 ? tuples[0] : { anyOf: tuples });
+      } else {
+        schema.enum = distinct;
       }
     }
     if (this.options.xml !== false) {
@@ -1289,9 +1358,16 @@ export class SimpleTypes {
     const text = normalizeWhiteSpace(lexical, 'collapse');
     const parts = text === '' ? [] : text.split(' ');
     const json = this.jsonType(list.item, list.node);
+    const float = this.isFloat(list.item, list.node);
     const out: unknown[] = [];
     let rounded = false;
     for (const part of parts) {
+      // An xs:float item beyond the range of a float is INF or -INF, as for a single value.
+      const overflow = float ? floatOverflow(part) : undefined;
+      if (overflow !== undefined) {
+        out.push(overflow);
+        continue;
+      }
       const converted = lexicalToJson(json, json === 'string' ? this.normalizeValue(list.item, part, list.node) : part);
       if ('error' in converted) {
         return { error: `list item ${converted.error}` };
@@ -1314,6 +1390,11 @@ export class SimpleTypes {
     const derivation = this.derive(type, from);
     if (derivation.list && this.jsonType(type, from) === 'array') {
       return this.listToJson(derivation.list, lexical);
+    }
+    // An xs:float literal beyond the range of a float is INF or -INF, also where a double can't hold it, such as 1e400.
+    const overflow = this.isFloat(type, from) ? floatOverflow(xmlTrim(lexical)) : undefined;
+    if (overflow !== undefined) {
+      return { value: overflow };
     }
     const json = this.jsonType(type, from);
     return lexicalToJson(json, json === 'string' ? this.normalizeValue(type, lexical, from) : lexical);
@@ -1532,6 +1613,22 @@ function itemViolation(items: JsonSchema, value: unknown[]): string | undefined 
     }
   }
   return undefined;
+}
+
+/**
+ * The JSON arrays that are the same list of xs:float values as `value`: exactly as many items, each one the same float
+ * as the item at its place (see `floatValueSchema`). The empty list is the empty array; `prefixItems` must not be empty.
+ */
+export function floatTuple(value: unknown[]): JsonSchema {
+  if (value.length === 0) {
+    return { type: 'array', maxItems: 0 };
+  }
+  return {
+    type: 'array',
+    prefixItems: value.map((item) => floatValueSchema(item as number | string)),
+    minItems: value.length,
+    maxItems: value.length,
+  };
 }
 
 /** The JSON type all members of a union share, with integer and number counted as number; undefined if they differ. */

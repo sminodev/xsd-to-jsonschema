@@ -17,7 +17,8 @@ const { schema, problems, structure } = describeSchemaFile('order.xsd');
 
 `schema` and `problems` are exactly what `convert()` returns for the same input; the one difference is that
 `describeSchemaFile` names itself in messages about locations it doesn't read. `structure` is undefined when there is no
-schema.
+schema. This holds as long as the report fits `limits.maxStructureSize` (see [Limits](#limits)): above it there is
+neither a schema nor a structure, and `problems` ends with a `resource-limit` that names the limit and its value.
 
 ## Overview
 
@@ -184,3 +185,12 @@ type is listed on that type. Problems about files, such as `missing-file`, belon
 - The report covers what `convert()` supports: XML Schema 1.0. Where no schema is written, such as for a redefined
   type, there is no report.
 - Namespaces of wildcards and the XPaths of identity constraints are reported as written, not evaluated.
+- The report lists the particles of a group again wherever the group is referred to, and each type lists its inherited
+  attributes and those of its attribute groups again. Groups that each refer twice to the next one therefore make a
+  report that doubles with every level, although the JSON Schema stays small. `limits.maxStructureSize` (default
+  20000000, a positive safe integer) bounds the whole report in structure units. Every value counts 1, every field
+  name 1, and a string also its length, so pointers, identity constraints, type alternatives and attribute lists count
+  wherever they are written. The unit is no measure of memory. Above the limit `describeSchema()` returns neither a
+  schema nor a structure, and a `resource-limit` names the limit. The same holds where the report nests deeper than
+  the converter's stack reaches, even where `convert()` still writes the schema. `maxOutputEntries` bounds the JSON
+  Schema, not the report; `convert()` doesn't use `maxStructureSize`.

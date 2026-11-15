@@ -38,12 +38,22 @@ export const localName = (key: string): string => parse(key)?.local ?? key;
 /** The final name of each property of an object. */
 export function planKeys(keys: string[], textProperty: string): Map<string, string> {
   const names = new Map(keys.map((key) => [key, parse(key)]));
+  // The namespaces of each local name, elements and attributes apart, gathered once: linear in the number of keys.
+  const byLocal = new Map<string, Set<string>>();
+  const group = (attribute: boolean, local: string): string => `${attribute ? '@' : ''}${local}`;
+  for (const name of names.values()) {
+    if (name) {
+      const key = group(name.attribute, name.local);
+      const found = byLocal.get(key);
+      if (found) {
+        found.add(name.ns);
+      } else {
+        byLocal.set(key, new Set([name.ns]));
+      }
+    }
+  }
   const namespaces = (attribute: boolean, local: string): Set<string> =>
-    new Set(
-      [...names.values()]
-        .filter((n): n is Name => n !== undefined && n.attribute === attribute && n.local === local)
-        .map((n) => n.ns),
-    );
+    byLocal.get(group(attribute, local)) ?? new Set();
   const plan = new Map<string, string>();
   for (const [key, name] of names) {
     if (!name) {
@@ -66,7 +76,12 @@ export function planKeys(keys: string[], textProperty: string): Map<string, stri
  *
  * @returns the names that two properties would share, which are kept by the first one
  */
-export function renameObject(schema: JsonSchema, plan: Map<string, string>, xml: boolean): string[] {
+export function renameObject(
+  schema: JsonSchema,
+  plan: Map<string, string>,
+  xml: boolean,
+  moved?: (from: object, to: object) => void,
+): string[] {
   const clashes: string[] = [];
   if (schema.properties) {
     const properties: Record<string, JsonSchema | boolean> = {};
@@ -95,11 +110,57 @@ export function renameObject(schema: JsonSchema, plan: Map<string, string>, xml:
       schema.propertyNames = { enum: Object.keys(properties) };
     }
   }
-  renameConstraints(schema, plan);
+  renameConstraints(schema, plan, moved);
   return clashes;
 }
 
-function renameConstraints(schema: JsonSchema, plan: Map<string, string>): void {
+/**
+ * The output entries of a schema, which `maxOutputEntries` limits: one for each key of a `properties` map and one for
+ * each branch of an `anyOf` or `oneOf`, in the schema and the schemas inside it, each time it is written. An `allOf`
+ * is followed without counting its parts; a `$ref` is not followed, and `$defs` count where they are written.
+ */
+export function outputEntries(schema: JsonSchema | boolean | undefined): number {
+  if (typeof schema !== 'object') {
+    return 0;
+  }
+  let entries = 0;
+  for (const value of Object.values(schema.properties ?? {})) {
+    entries += 1 + outputEntries(value);
+  }
+  for (const part of [...(schema.anyOf ?? []), ...(schema.oneOf ?? [])]) {
+    entries += 1 + outputEntries(part);
+  }
+  for (const part of [
+    ...(schema.allOf ?? []),
+    ...(schema.prefixItems ?? []),
+    schema.items,
+    schema.not,
+    schema.additionalProperties,
+    schema.propertyNames,
+    ...Object.values(schema.dependentSchemas ?? {}),
+    ...Object.values(schema.$defs ?? {}),
+  ]) {
+    entries += outputEntries(part);
+  }
+  return entries;
+}
+
+/** The schemas inside the constraints of an object: its choice branches, what they rule out and bring along. */
+function constraintParts(schema: JsonSchema): JsonSchema[] {
+  return [
+    ...(schema.oneOf ?? []),
+    ...(schema.anyOf ?? []),
+    ...(schema.allOf ?? []),
+    ...(schema.not ? [schema.not] : []),
+    ...Object.values(schema.dependentSchemas ?? {}),
+  ];
+}
+
+function renameConstraints(
+  schema: JsonSchema,
+  plan: Map<string, string>,
+  moved?: (from: object, to: object) => void,
+): void {
   const rename = (key: string) => plan.get(key) ?? key;
   if (schema.required) {
     schema.required = [...new Set(schema.required.map(rename))];
@@ -115,17 +176,12 @@ function renameConstraints(schema: JsonSchema, plan: Map<string, string>): void 
     );
   }
   // The constraints of choices: their branches, what they rule out, and what a property brings along.
-  const parts = [
-    ...(schema.oneOf ?? []),
-    ...(schema.anyOf ?? []),
-    ...(schema.allOf ?? []),
-    ...(schema.not ? [schema.not] : []),
-    ...Object.values(schema.dependentSchemas ?? {}),
-  ];
-  for (const part of parts) {
+  for (const part of constraintParts(schema)) {
     if (part.properties) {
-      part.properties = Object.fromEntries(Object.entries(part.properties).map(([key, v]) => [rename(key), v]));
+      const from = part.properties;
+      part.properties = Object.fromEntries(Object.entries(from).map(([key, v]) => [rename(key), v]));
+      moved?.(from, part.properties);
     }
-    renameConstraints(part, plan);
+    renameConstraints(part, plan, moved);
   }
 }

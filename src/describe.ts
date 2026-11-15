@@ -1,12 +1,18 @@
 import { type ConvertInput, run } from './convert.js';
 import type { JsonSchema } from './json-schema.js';
 import type { Problem } from './problems.js';
-import { ObjectRecorder, type Structure, StructureBuilder } from './structure.js';
+import { ObjectRecorder, type Structure, StructureBuilder, StructureLimitExceeded } from './structure.js';
 
 export interface DescribeSchemaResult {
-  /** the same schema `convert()` writes for the same input */
+  /**
+   * the same schema `convert()` writes for the same input, as long as the structure report fits `maxStructureSize`;
+   * undefined when it doesn't
+   */
   schema: JsonSchema | undefined;
-  /** the same problems `convert()` reports */
+  /**
+   * the same problems `convert()` reports; when the structure report exceeds `maxStructureSize`, also a
+   * `resource-limit` that names the limit and its value
+   */
   problems: Problem[];
   /** undefined when there is no schema */
   structure: Structure | undefined;
@@ -42,7 +48,19 @@ export function describeWithSizes(
       (kind, id) => emitter.definitionName(kind, id),
       settings.textProperty,
     );
-    structure = builder.build(root);
+    try {
+      structure = builder.build(root);
+    } catch (e) {
+      // Above the limit, or where the report nests deeper than the stack reaches, there is neither a schema nor a
+      // report, as for the other limits and as in convert(): no cut-off report.
+      if (!(e instanceof StructureLimitExceeded) && !(e instanceof RangeError)) {
+        throw e;
+      }
+      const message =
+        e instanceof StructureLimitExceeded ? e.message : 'the schema nests deeper than the converter can follow';
+      problems.error('resource-limit', message, { file: root.doc.path });
+      return { schema: undefined, problems: problems.list, structure: undefined };
+    }
   }
   return { schema, problems: problems.list, structure };
 }

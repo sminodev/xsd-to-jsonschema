@@ -238,14 +238,15 @@ a list member stays a string without member checks, also reported as `unsupporte
 ### Special float values
 
 `xs:float` and `xs:double` also have the values `INF`, `-INF` and `NaN`, which JSON numbers can't hold. They are the
-strings `"INF"`, `"-INF"` and `"NaN"`, in elements, attributes, lists, unions and simple content; finite values stay
-numbers. `+INF` is no value in XML Schema 1.0. A literal beyond the range of a double, such as `1E309`, has no JSON
+strings `"INF"`, `"-INF"` and `"NaN"`, in elements, attributes, lists, unions and simple content; a finite value is a
+number. `+INF` is no value in XML Schema 1.0. A literal beyond the range of a double, such as `1E309`, has no JSON
 number; a reader writes it as `INF` or `-INF`, as XML Schema 1.1 rounds it. The facets decide which of the three a
 type allows:
 
 - An inclusive bound of `NaN` allows exactly `NaN`, an exclusive one no value; every other bound rules out `NaN`.
 - A finite minimum rules out `-INF`, a finite maximum `INF`. A bound of `INF` or `-INF` limits the numbers instead:
-  `minInclusive="INF"` allows only `INF`.
+  on `xs:double`, `minInclusive="INF"` allows only `"INF"`; on `xs:float` also the numbers that round to `INF`, as
+  below.
 - A `pattern` applies to the three strings, an `enumeration` lists those it allows.
 
 The schema is an `anyOf` of the number and an `enum` of the allowed strings, `{"anyOf": [{"type": "number", "maximum":
@@ -254,8 +255,19 @@ a plain number, one that allows no number an `enum` of strings. An `xs:float` is
 of it stands for all numbers that round to the same float: the schema has the range of numbers halfway to the
 neighbouring floats, `{"exclusiveMinimum": 0.09999999776482582, "exclusiveMaximum": 0.10000000521540642}` for `0.1`, so
 `0.10000000149011612` is the same value. Bounds and `fixed` of `xs:float` compare the same way: `minInclusive="0.1"`
-starts at the lower end of the range of `0.1`, and `fixed="0.1"` is the whole range, with the value in `default`. A
-union with a float or double member has no `type` of its own; its members decide.
+starts at the lower end of the range of `0.1`, and `fixed="0.1"` is the whole range, with the value in `default`.
+
+The same holds at the ends of the range of a float: every number from 2^128 - 2^103 (3.4028235677973366e38) on rounds
+to the float `INF`, every number up to its negative to `-INF`. So an `xs:float` type that allows `INF` also allows these
+numbers, beside the string, and one that rules out `INF` rules them out: `minInclusive="INF"` allows `"INF"` and the
+numbers from 3.4028235677973366e38 on, `maxExclusive="INF"` the numbers below it, and `fixed="INF"` is `"INF"` or such
+a number, with `"INF"` in `default`. A literal of the schema beyond the range of a float, such as `fixed="1e39"`,
+`-1e39` in an enumeration or `default="1e400"`, which even a double can't hold, is `INF` or `-INF` in the same way; as
+a `default` it is written `"INF"` or `"-INF"`. The
+string is the form these values are written in; the numbers are further JSON forms of the same value, as a document
+can write it, `1e39` for instance. On `xs:double`, `INF` and `-INF` are the strings only.
+
+A union with a float or double member has no `type` of its own; its members decide.
 
 ### Equal values
 
@@ -287,6 +299,10 @@ with `"xml": {"list": true}`. XML collapses the whitespace of a list and splits 
 - An enumeration compares values: it becomes an `enum` of arrays. With the enumeration `1 2` on a list of integers,
   `"+01 002"` is valid and becomes `[1, 2]`.
 - `fixed` and `default` become arrays too: `fixed="true 0"` on a list of booleans gives `"const": [true, false]`.
+- A list of `xs:float` compares its items as floats (see [Special float values](#special-float-values)), so an
+  enumerated or fixed list is not an array of numbers but one array schema per value: exactly as many items, each the
+  numbers, or the string `INF` or `-INF`, that are the float at its place. Several enumerated values are an `anyOf` of
+  these; a list whose items belong to different values, such as `1 4` for the values `1 2` and `3 4`, matches none.
 - A `pattern` on a list restricts the text of the whole list and can't be checked on the array. It is left out and
   reported as `unsupported-list-pattern`.
 - An element of a list type with `maxOccurs` greater than 1 is an array of lists: `[[6], [7, 8]]`. Only the inner
@@ -553,32 +569,32 @@ The library returns diagnostics without logging them. For CLI output streams and
 
 ### Errors: mistakes in the XML Schema
 
-| Code                  | Meaning                                                                                                                                |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `circular-group`      | A group or attribute group contains itself.                                                                                            |
-| `circular-type`       | A type derives from itself.                                                                                                            |
-| `duplicate-component` | Two global components of the same kind have the same name.                                                                             |
-| `invalid-facet`       | An invalid facet value, such as `maxLength="abc"`, or a `whiteSpace` that relaxes its base; the facet or enumeration value is dropped. |
-| `invalid-value`       | A `fixed` or `default` value doesn't fit its type.                                                                                     |
-| `unknown-attribute`   | An attribute reference can't be resolved.                                                                                              |
-| `unknown-element`     | An element reference can't be resolved.                                                                                                |
-| `unknown-group`       | A group or attribute-group reference can't be resolved.                                                                                |
-| `unknown-prefix`      | A prefix has no namespace declaration.                                                                                                 |
-| `unknown-type`        | A type or base type isn't defined.                                                                                                     |
+| Code                  | Meaning                                                                                                                                                           |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `circular-group`      | A group or attribute group contains itself.                                                                                                                       |
+| `circular-type`       | A type derives from itself.                                                                                                                                       |
+| `duplicate-component` | Two global components of the same kind have the same name.                                                                                                        |
+| `invalid-facet`       | An invalid facet value, such as `maxLength="abc"`, or a `whiteSpace` that relaxes its base; the facet or enumeration value is dropped.                            |
+| `invalid-value`       | A `fixed` or `default` value doesn't fit its type, such as an `xs:double` literal beyond the range of a double; on `xs:float`, such a literal is `INF` or `-INF`. |
+| `unknown-attribute`   | An attribute reference can't be resolved.                                                                                                                         |
+| `unknown-element`     | An element reference can't be resolved.                                                                                                                           |
+| `unknown-group`       | A group or attribute-group reference can't be resolved.                                                                                                           |
+| `unknown-prefix`      | A prefix has no namespace declaration.                                                                                                                            |
+| `unknown-type`        | A type or base type isn't defined.                                                                                                                                |
 
 ### Errors: files and the root element
 
-| Code                   | Meaning                                                                                                                                                                                                                                                                                |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `invalid-xml`          | A schema file isn't well-formed XML.                                                                                                                                                                                                                                                   |
-| `missing-file`         | A schema file is missing or can't be read, such as a URL that `convertFile` doesn't read.                                                                                                                                                                                              |
-| `namespace-mismatch`   | An `xs:import` names another namespace than the target namespace of the imported document.                                                                                                                                                                                             |
-| `not-a-schema`         | A file isn't an XML Schema document.                                                                                                                                                                                                                                                   |
-| `resource-limit`       | The schema set exceeds a size limit, or the schema nests deeper than the converter can follow (local element types more than 1000 levels deep, or model groups so deep that the stack runs out); the message names the limit. No schema is written. See [Schema input](#schema-input). |
-| `root-required`        | No root is selected and the entry has no global element or more than one.                                                                                                                                                                                                              |
-| `unknown-root`         | The selected root isn't a global element in the loaded schema set.                                                                                                                                                                                                                     |
-| `unsafe-input`         | A file has a DOCTYPE declaration other than the harmless form or a markup declaration after the root element, the entry is outside the base directory, or a schema location leaves it; no schema is written. See [Schema input](#schema-input).                                        |
-| `unsupported-encoding` | A schema file declares an encoding other than UTF-8, UTF-16 (with a byte order mark), ISO-8859-1 and US-ASCII; no schema is written. See [Schema input](#schema-input).                                                                                                                |
+| Code                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invalid-xml`          | A schema file isn't well-formed XML.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `missing-file`         | A schema file is missing or can't be read, such as a URL that `convertFile` doesn't read.                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `namespace-mismatch`   | An `xs:import` names another namespace than the target namespace of the imported document.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `not-a-schema`         | A file isn't an XML Schema document.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `resource-limit`       | The schema set exceeds a size limit, the schema would hold more output entries than `maxOutputEntries` allows, the structure report of `describeSchema()` would exceed `maxStructureSize`, or it nests deeper than the converter can follow (local element types more than 1000 levels deep, or nested model groups, chains of group references or chains of derived types so deep that the stack runs out); the message names the limit. No schema is written. See [Schema input](#schema-input). |
+| `root-required`        | No root is selected and the entry has no global element or more than one.                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `unknown-root`         | The selected root isn't a global element in the loaded schema set.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `unsafe-input`         | A file has a DOCTYPE declaration other than the harmless form or a markup declaration after the root element, the entry is outside the base directory, or a schema location leaves it; no schema is written. See [Schema input](#schema-input).                                                                                                                                                                                                                                                    |
+| `unsupported-encoding` | A schema file declares an encoding other than UTF-8, UTF-16 (with a byte order mark), ISO-8859-1 and US-ASCII; no schema is written. See [Schema input](#schema-input).                                                                                                                                                                                                                                                                                                                            |
 
 ## Schema input
 
@@ -592,6 +608,18 @@ The converter reads schema documents as data and stops before they grow too larg
   (chameleon include) is loaded once more for that namespace and counts again, as a document and with its bytes.
   Above a limit, `resource-limit` names the limit in effect, and no schema is written, as with `unsafe-input`: a
   schema without the documents left out would look usable but be incomplete.
+- **Output limit:** a small schema can describe a large JSON Schema: a long chain of extensions whose types are all
+  used repeats every inherited property in each type and lists every derived type at each use. `maxOutputEntries`
+  (`--max-output-entries`, by default 200000, a positive safe integer) limits the output entries of the schema: one for
+  each key of a `properties` map and one for each branch of an `anyOf` or `oneOf`, wherever it is written; `allOf`,
+  other keywords, `enum` values and `required` names don't count, and a definition counts once, however often a `$ref`
+  points to it. Above it, `resource-limit` names the limit, and no schema is written. The converter stops while it
+  writes the schema, as soon as it is certain to exceed the limit, and counts the entries of a choice before it makes
+  them. A property it builds only to drop it, such as one a further particle declares again, doesn't count. Where a
+  later particle of the same object declares a name of a choice again, the choice can no longer rule that name out
+  (`approximated-occurrences`), so its `false` entries for the name are not made at all. The limit bounds these
+  entries, not the memory or the size of the output. The structure report of `describeSchema()` has a limit of its
+  own, `maxStructureSize` (see [Structure report](structure.md#limits)).
 - **DOCTYPE:** a DTD can define entities that change what a document says or read other files, so the converter
   processes none. It accepts one form that provably changes nothing, a DOCTYPE that only restates namespace declarations
   of the root element and declares unused entities: one DOCTYPE before the root element, whose `PUBLIC` or `SYSTEM`
@@ -601,13 +629,16 @@ The converter reads schema documents as data and stops before they grow too larg
   section or processing instruction is no use of it. Such a declaration is replaced by spaces, keeping line numbers, and
   reported as `neutralized-doctype`. Any other DOCTYPE is `unsafe-input`: an entity used in the document, a declaration
   of a predefined entity such as `amp`, an external entity, a parameter entity reference, an `ELEMENT` declaration, a
-  namespace default the root element doesn't state with the same text, or a markup declaration after the root element.
-  Text in a comment that only looks like a DOCTYPE is a comment.
+  namespace default the root element doesn't state with the same text, white space missing where XML requires it, also
+  between two attribute definitions, or a markup declaration after the root element. Text in a comment that only looks
+  like a DOCTYPE is a comment.
 - **Encoding:** `convertFile` reads the bytes of each file and decodes them as the byte order mark and the XML
   declaration say: UTF-8 (also without both), UTF-16 with a byte order mark, ISO-8859-1 (each byte its own code point,
-  not Windows-1252) and US-ASCII. Another encoding is `unsupported-encoding`. Bytes the encoding doesn't allow, a
-  byte order mark the declaration contradicts, a second byte order mark and white space before the XML declaration
-  are `invalid-xml`. No replacement character stands in for a bad byte, and no schema is written. The size limits
+  not Windows-1252) and US-ASCII; the XML declaration is read to its `?>`, however long. Another encoding is
+  `unsupported-encoding`. Bytes the encoding doesn't allow, a byte order mark the declaration contradicts, a second
+  byte order mark, white space before the XML declaration, a declaration without `?>`, and a byte order mark or an XML
+  declaration later in the prolog are `invalid-xml`. No replacement character stands in for a bad byte, and no schema
+  is written. The size limits
   count the bytes of the file. `convert` takes text that is already decoded and ignores its encoding declaration.
 - **Locations:** `convertFile` reads relative paths inside its base directory only. A schema location that leaves it,
   a symbolic link to outside, an absolute path or a `file:` URL is `unsafe-input`, and no schema is written. Another
@@ -616,8 +647,13 @@ The converter reads schema documents as data and stops before they grow too larg
 ## Limits
 
 - Anonymous complex types of local elements nested more than 64 levels deep are written as definitions in `$defs`;
-  beyond 1000 levels, and for model groups nested so deep that the converter's stack runs out, there is no schema
-  but `resource-limit`.
+  beyond 1000 levels there is no schema but `resource-limit`. The same holds where nested model groups, chains of
+  group references or chains of derived types (`extension`, `restriction`) run so deep that the converter's stack runs
+  out. How many levels that allows depends on the shape of the schema and on the state of the Node.js process; a
+  fresh process, as the command line starts, reaches it earlier than one that has converted before. This version
+  reaches it at fewer levels than the previous one.
+- Nested simple-type lists and unions are traversed with a depth limit of 1000. Beyond that depth the converter
+  reports `resource-limit`.
 - XML child-element order isn't checked, and no problem is reported for it: it is a limit of every JSON object.
   Listing properties in schema order doesn't enforce that order in JSON. For `<xs:sequence>` of `a` and `b`, the
   documents `<R><a/><b/></R>` and `<R><b/><a/></R>` both become `{"a": "", "b": ""}`; the second is invalid XML, and
@@ -640,7 +676,9 @@ The converter reads schema documents as data and stops before they grow too larg
   syntax, not that the prefix is bound, and enumeration and `fixed` values compare the prefixed text. Check QName
   values against the XML document before converting it when the binding matters.
 - Numeric values and bounds use JavaScript numbers. Precision lost during parsing cannot be recovered; a value that
-  a JSON number cannot hold exactly is reported as `rounded-number`.
+  a JSON number cannot hold exactly is reported as `rounded-number`. An `xs:float` literal is rounded to a double
+  first, then to a float; a decimal very close to the middle between two floats, or to 3.4028235677973366e38, can
+  thus end on the neighbouring float.
 - `xs:long` is emitted without bounds; `xs:unsignedLong` keeps only its minimum of 0. Their limits exceed the exact
   integer range of JavaScript numbers.
 

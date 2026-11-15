@@ -6,6 +6,12 @@ import { EncodingError } from './encoding.js';
 export const XS = 'http://www.w3.org/2001/XMLSchema';
 const XML_NS = 'http://www.w3.org/XML/1998/namespace';
 
+/**
+ * Line ends as XML 1.0 normalizes them (2.11): CR LF and a lone CR become LF. The parser's default also turns U+0085,
+ * U+2028 and U+2029 into LF, as XML 1.1 does; in XML 1.0 they are ordinary characters.
+ */
+export const lineEnds = (text: string): string => text.replace(/\r\n?/g, '\n');
+
 export type ComponentKind = 'element' | 'attribute' | 'complexType' | 'simpleType' | 'group' | 'attributeGroup';
 const KINDS: readonly ComponentKind[] = [
   'element',
@@ -22,7 +28,7 @@ export interface QName {
   local: string;
 }
 
-/** Size limits of a schema set; each a positive safe integer. */
+/** Size limits of a schema set and of the schema written from it; each a positive safe integer. */
 export interface Limits {
   /** bytes of one document, counted as UTF-8; default 4 MiB */
   maxFileBytes?: number | undefined;
@@ -30,6 +36,17 @@ export interface Limits {
   maxTotalBytes?: number | undefined;
   /** documents, a document loaded again for another namespace counted again; default 128 */
   maxDocuments?: number | undefined;
+  /**
+   * output entries the schema may hold: one for each key of a `properties` map and one for each branch of an `anyOf` or
+   * `oneOf`, wherever it is written, a `$ref` not followed; default 200000. Bounds a schema that grows with the square of
+   * its input, such as a long chain of extensions whose types are all used.
+   */
+  maxOutputEntries?: number | undefined;
+  /**
+   * structure units the whole report of `describeSchema()` may hold (see `structureSize`); default 20000000. Bounds a
+   * report that doubles with every level of groups that each refer twice to the next one. Not used by `convert()`.
+   */
+  maxStructureSize?: number | undefined;
 }
 
 /** Limits with every value set. */
@@ -39,6 +56,8 @@ export const DEFAULT_LIMITS: EffectiveLimits = {
   maxFileBytes: 4 * 1024 * 1024,
   maxTotalBytes: 16 * 1024 * 1024,
   maxDocuments: 128,
+  maxOutputEntries: 200_000,
+  maxStructureSize: 20_000_000,
 };
 
 /** The limits with their defaults; throws a TypeError for a value that is no positive safe integer. */
@@ -99,6 +118,15 @@ export function xsChildren(node: Node): Element[] {
 
 export function xsChild(node: Node, localName: string): Element | undefined {
   return xsChildren(node).find((child) => child.localName === localName);
+}
+
+/**
+ * The value of an attribute of type xs:boolean: true for `true` or `1`, false for `false` or `0`, with XML white space
+ * (space, tab, line feed, carriage return) at both ends allowed, as xs:boolean collapses it; undefined for anything else.
+ */
+export function booleanOf(value: string | undefined): boolean | undefined {
+  const token = value?.replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, '');
+  return token === 'true' || token === '1' ? true : token === 'false' || token === '0' ? false : undefined;
 }
 
 export function attr(node: Element, name: string): string | undefined {
@@ -217,7 +245,7 @@ export class SchemaSet {
     attributeGroup: new Map(),
   };
   private readonly read: (path: string) => string | undefined;
-  private readonly limits: EffectiveLimits;
+  readonly limits: EffectiveLimits;
   /** a group or attribute group in xs:redefine -> the definition it replaces, which a reference inside it means */
   private readonly originals = new Map<Element, Component>();
   /**
@@ -335,6 +363,8 @@ export class SchemaSet {
     let root: Element | null;
     try {
       const xml = new DOMParser({
+        // XML 1.0 ends lines with CR LF and CR only (2.11); U+0085, U+2028 and U+2029 stay characters.
+        normalizeLineEndings: lineEnds,
         onError: (level, message) => {
           if (level !== 'warning') {
             throw new Error(message);

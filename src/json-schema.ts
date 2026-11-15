@@ -55,6 +55,8 @@ export interface JsonSchema {
   const?: unknown;
   default?: unknown;
   items?: JsonSchema;
+  /** the schemas of the first items, one for each place */
+  prefixItems?: JsonSchema[];
   minItems?: number;
   maxItems?: number;
   properties?: Record<string, JsonSchema | boolean>;

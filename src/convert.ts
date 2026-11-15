@@ -1,5 +1,5 @@
 import type { Recorder } from './content-model.js';
-import { Emitter, type EmitterOptions } from './emitter.js';
+import { Emitter, type EmitterOptions, OutputLimitExceeded } from './emitter.js';
 import { NAME_CHAR, NAME_START } from './name-chars.js';
 import type { JsonSchema } from './json-schema.js';
 import { type Problem, Problems } from './problems.js';
@@ -34,6 +34,9 @@ export interface ConvertInput {
    * Size limits of the schema set, each a positive safe integer: `maxFileBytes` per document (default 4194304),
    * `maxTotalBytes` for all documents (default 16777216) and `maxDocuments` (default 128). Bytes count as UTF-8
    * before parsing; a document loaded again for another namespace (chameleon include) counts again.
+   * `maxOutputEntries` (default 200000) limits the output entries of the schema written: each key of a `properties`
+   * map and each branch of an `anyOf` or `oneOf`, wherever it is written. `maxStructureSize` (default 20000000)
+   * limits the structure report of `describeSchema()` and is not used here.
    */
   limits?: Limits | undefined;
 }
@@ -111,7 +114,12 @@ export function run(
   try {
     schema = emitter.root(element);
   } catch (e) {
-    // A schema that nests deeper than the converter's stack reaches gives no schema rather than an exception.
+    // A schema above maxOutputEntries, or one that nests deeper than the converter's stack reaches, gives no schema
+    // rather than an exception.
+    if (e instanceof OutputLimitExceeded) {
+      problems.error('resource-limit', e.message, { file: doc.path });
+      return { schema: undefined, problems, settings };
+    }
     if (!(e instanceof RangeError)) {
       throw e;
     }

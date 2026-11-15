@@ -57,4 +57,14 @@ describe('the encoding of schema files', () => {
     // The byte order mark stays: the loader refuses a second one.
     expect(decodeSchema(new TextEncoder().encode('\uFEFF<a/>'))).toBe('\uFEFF<a/>');
   });
+
+  it('read the encoding of an XML declaration of any length, and refuse one without its end', () => {
+    // Bytes C3 BC are ü in UTF-8, but Ã¼ in the ISO-8859-1 the declaration names after 600 spaces.
+    const declaration = `<?xml version="1.0"${' '.repeat(600)}encoding="ISO-8859-1"?>`;
+    const ascii = (text: string) => [...new TextEncoder().encode(text)];
+    const bytes = new Uint8Array([...ascii(`${declaration}<a>`), 0xc3, 0xbc, ...ascii('</a>')]);
+    expect(decodeSchema(bytes).endsWith('<a>\u00c3\u00bc</a>')).toBe(true);
+    const unterminated = new TextEncoder().encode(`<?xml version="1.0"${' '.repeat(600)}<a/>`);
+    expect(() => decodeSchema(unterminated)).toThrow(EncodingError);
+  });
 });
