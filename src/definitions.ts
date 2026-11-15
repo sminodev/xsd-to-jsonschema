@@ -31,6 +31,11 @@ export class Definitions {
     return { $ref: `#/$defs/${pointerEscape(name)}` };
   }
 
+  /** The definition name of a component, if it has been referenced. */
+  nameOf(kind: string, id: string): string | undefined {
+    return this.names.get(`${kind} ${id}`);
+  }
+
   /** Builds every queued definition, including those that the built schemas reference in turn. */
   buildAll(): Map<string, JsonSchema> {
     for (let job = this.pending.shift(); job; job = this.pending.shift()) {

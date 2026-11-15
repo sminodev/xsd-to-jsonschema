@@ -1,3 +1,4 @@
+import type { Recorder } from './content-model.js';
 import { Emitter, type EmitterOptions } from './emitter.js';
 import { NAME_CHAR, NAME_START } from './name-chars.js';
 import type { JsonSchema } from './json-schema.js';
@@ -61,10 +62,31 @@ export function convert(input: ConvertInput): ConvertResult {
  *
  * @param sizeOf - the bytes of a document in its file, which the size limits count
  */
-export function convertSchemas(
+export function convertSchemas(input: ConvertInput, sizeOf?: (path: string) => number | undefined): ConvertResult {
+  const { schema, problems } = run(input, sizeOf);
+  return { schema, problems: problems.list };
+}
+
+/** A conversion with what `describeSchema` reads next to the schema. */
+export interface Conversion {
+  schema: JsonSchema | undefined;
+  problems: Problems;
+  set?: SchemaSet;
+  root?: Component;
+  emitter?: Emitter;
+  settings: EmitterOptions;
+}
+
+/**
+ * Converts the schema of one root element.
+ *
+ * @param recorder - learns the final property names of each object written; leaves the result as it is
+ */
+export function run(
   { files, entry, root, options = {}, limits }: ConvertInput,
   sizeOf?: (path: string) => number | undefined,
-): ConvertResult {
+  recorder?: Recorder,
+): Conversion {
   const settings: EmitterOptions = {
     dateTime: options.dateTime ?? 'pattern',
     xml: options.xml ?? true,
@@ -82,20 +104,21 @@ export function convertSchemas(
   const doc = set.load(entry);
   const element = doc && findRoot(set, doc, root, problems);
   if (!element || set.blocked) {
-    return { schema: undefined, problems: problems.list };
+    return { schema: undefined, problems, settings };
   }
+  const emitter = new Emitter(set, problems, settings, recorder);
   let schema: JsonSchema;
   try {
-    schema = new Emitter(set, problems, settings).root(element);
+    schema = emitter.root(element);
   } catch (e) {
     // A schema that nests deeper than the converter's stack reaches gives no schema rather than an exception.
     if (!(e instanceof RangeError)) {
       throw e;
     }
     problems.error('resource-limit', 'the schema nests deeper than the converter can follow', { file: doc.path });
-    return { schema: undefined, problems: problems.list };
+    return { schema: undefined, problems, settings };
   }
-  return { schema, problems: problems.list };
+  return { schema, problems, set, root: element, emitter, settings };
 }
 
 /** The global elements a document declares, as `{namespace}name`. */

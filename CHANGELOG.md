@@ -3,6 +3,9 @@ Release versions follow [Semantic Versioning](http://semver.org/spec/v2.0.0.html
 
 ## [unreleased]
 
+- Add `describeSchema()` and `describeSchemaFile()`: the schema and problems of `convert()` plus a structure report with
+  particles in order, compositors, wildcards, identity constraints and raw facets, each linked to its property by a JSON
+  Pointer; see [Structure report](docs/structure.md).
 - Export `isMultipleOf()`, the decimal `multipleOf` check for Ajv; see [Validating with Ajv](docs/validation.md).
 - Require Node.js 22.13 or later to support the ESLint 10 toolchain.
 - Check the npm package in CI on the exact minimum Node.js version.

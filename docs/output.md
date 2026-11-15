@@ -2,6 +2,8 @@
 
 `convert()` and `convertFile()` generate a JSON Schema Draft 2020-12 document for one global XSD element.
 The resulting schema validates the JSON representation described below, not the XML document itself.
+What the mapping leaves out, such as element order or wildcard namespaces, is available from `describeSchema()`; see the
+[structure report](structure.md).
 
 [`examples/order`](../examples/order) contains a multi-file XSD, its
 [generated schema](../examples/order/order.schema.json) and corresponding XML and JSON examples.

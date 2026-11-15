@@ -81,6 +81,8 @@ export function messageOf(e: unknown): string {
 /** Collects the problems of one conversion; the same problem at the same place is kept once. */
 export class Problems {
   readonly list: Problem[] = [];
+  /** the schema node of each problem in `list`, where one is known */
+  readonly nodes: (Node | undefined)[] = [];
   private readonly keys = new Set<string>();
 
   add(severity: Problem['severity'], code: ProblemCode, message: string, at: At = {}): void {
@@ -98,7 +100,16 @@ export class Problems {
     if (!this.keys.has(key)) {
       this.keys.add(key);
       this.list.push(problem);
+      this.nodes.push(at.node);
     }
+  }
+
+  /** Drops the problems found after the list had `length` entries. */
+  truncate(length: number): void {
+    for (const problem of this.list.splice(length)) {
+      this.keys.delete(JSON.stringify(problem));
+    }
+    this.nodes.splice(length);
   }
 
   error(code: ProblemCode, message: string, at?: At): void {

@@ -117,6 +117,13 @@ forms differ from XML Schema: RFC 3339 requires a time zone, so `xs:dateTime` an
 `2026-11-04T08:30:00`, are valid XML but rejected in `format` mode. Keep the default `pattern` for XML data that doesn't
 always carry a time zone; see [Dates and times](docs/output.md#dates-and-times).
 
+### Structure report
+
+`describeSchema()` and `describeSchemaFile()` return the same schema and problems as `convert()` and `convertFile()`,
+plus a report of the XML Schema's structure: particles in order with their compositors, wildcards, identity constraints
+and the raw facets, each linked to its property in the schema. The [structure documentation](docs/structure.md)
+describes it.
+
 ## Example: a multi-file order schema
 
 The order example combines three XSD files with XML and JSON sample documents:

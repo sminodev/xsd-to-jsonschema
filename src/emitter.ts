@@ -6,7 +6,15 @@
 import type { Element } from '@xmldom/xmldom';
 import { attributeKey, elementKey, planKeys, renameObject } from './keys.js';
 import { float32Range } from './value-forms.js';
-import { ContentModel, emptyFragment, type Fragment, occurs, type Prop, writeObject } from './content-model.js';
+import {
+  ContentModel,
+  emptyFragment,
+  type Fragment,
+  occurs,
+  type Prop,
+  type Recorder,
+  writeObject,
+} from './content-model.js';
 import { Definitions } from './definitions.js';
 import type { JsonSchema, XmlAnnotation } from './json-schema.js';
 import { blockedBy, Polymorphism, type TypeAlternative } from './polymorphism.js';
@@ -67,6 +75,7 @@ export class Emitter {
     private readonly set: SchemaSet,
     private readonly problems: Problems,
     private readonly options: EmitterOptions,
+    private readonly recorder?: Recorder,
   ) {
     this.simple = new SimpleTypes(
       set,
@@ -83,7 +92,13 @@ export class Emitter {
       options.xml,
       (node) => this.substitutes(node),
       options.textProperty,
+      recorder,
     );
+  }
+
+  /** The name in `$defs` of a component: kind `type`, `element` (an anonymous type) or `local`; see Definitions. */
+  definitionName(kind: string, id: string): string | undefined {
+    return this.definitions.nameOf(kind, id);
   }
 
   /** The schema of a global element: its content in place, with all definitions it reaches. */
@@ -1042,6 +1057,7 @@ export class Emitter {
     for (const clash of renameObject(schema, plan, this.options.xml)) {
       this.problems.error('duplicate-name', `${clash} is the name of two properties`, this.set.at(node));
     }
+    this.recorder?.object(node, plan, fragment.groupKeys);
     return schema;
   }
 }

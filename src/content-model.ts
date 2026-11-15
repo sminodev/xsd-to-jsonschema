@@ -65,6 +65,17 @@ export class GroupKeys {
     }
     return key;
   }
+
+  /** The key a group already has in this object. */
+  get(group: Element): string | undefined {
+    return this.keys.get(group);
+  }
+}
+
+/** Learns the final property names of the objects that are written; see structure.ts. */
+export interface Recorder {
+  /** the object of a complex type, or of one occurrence of a repeated group (`node` is then its particle) */
+  object(node: Element, plan: Map<string, string>, groupKeys: GroupKeys): void;
 }
 
 /** What a model group contributes to an object, with the properties it requires when it occurs once. */
@@ -227,6 +238,7 @@ export class ContentModel {
     private readonly substitutes: Substitutes = () => undefined,
     /** the property for the text of an element, which an element name must not take */
     private readonly textProperty = 'value',
+    private readonly recorder?: Recorder,
   ) {}
 
   /** Adds the model group of a complex type or derivation (its sequence, all, choice or group) to `fragment`. */
@@ -444,7 +456,9 @@ export class ContentModel {
       inner,
       this.xml,
     );
-    renameObject(item, planKeys(Object.keys(item.properties ?? {}), this.textProperty), this.xml);
+    const plan = planKeys(Object.keys(item.properties ?? {}), this.textProperty);
+    renameObject(item, plan, this.xml);
+    this.recorder?.object(node, plan, inner.groupKeys);
     const array = (low: number, high: number): JsonSchema => {
       const list: JsonSchema = { type: 'array', items: item };
       if (low > 0) {
