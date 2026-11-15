@@ -79,7 +79,8 @@ convert()
 - `src/simple-types.ts`: simple-type restriction chains and merged facets.
 - `src/numeric-facets.ts`: numeric bounds and exact alternatives for combined decimal digit constraints.
 - `src/simple-values.ts`: lexical values and enumeration filtering.
-- `src/decimal.ts`: decimal `multipleOf` arithmetic shared by enumeration checks and the test validator.
+- `src/decimal.ts`: decimal `multipleOf` arithmetic shared by enumeration checks and the test validator, exported as
+  `isMultipleOf`.
 - `src/xsd-regex.ts`: XML Schema patterns translated to anchored JavaScript regular expressions using the `u` flag.
 - `src/name-chars.ts`: the XML name characters of XML 1.0, Second Edition, from Appendix B of the recommendation.
 - `src/json-schema.ts`: types for the generated JSON Schema.

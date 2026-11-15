@@ -33,6 +33,11 @@ export function isExact(text: string, value: number): boolean {
   return Number(exponent) >= 0 || digits.length <= 15;
 }
 
+/**
+ * Whether `value` is a multiple of `step` as decimals: both are read from their shortest decimal form and compared
+ * exactly, so `1.12` is a multiple of `0.01` although the binary numbers are not. False for a step that is not a
+ * positive finite number.
+ */
 export function isMultipleOf(value: number, step: number): boolean {
   if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0) {
     return false;

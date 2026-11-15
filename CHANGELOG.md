@@ -3,6 +3,7 @@ Release versions follow [Semantic Versioning](http://semver.org/spec/v2.0.0.html
 
 ## [unreleased]
 
+- Export `isMultipleOf()`, the decimal `multipleOf` check for Ajv; see [Validating with Ajv](docs/validation.md).
 - Require Node.js 22.13 or later to support the ESLint 10 toolchain.
 - Check the npm package in CI on the exact minimum Node.js version.
 - Write a repeated sequence, choice or group reference as one property with an object per occurrence, such as

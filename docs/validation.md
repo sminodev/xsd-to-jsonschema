@@ -19,13 +19,8 @@ instead, replace the example paths with your own XSD and JSON files.
 import { readFileSync } from 'node:fs';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
+import { isMultipleOf } from 'xsd-to-jsonschema';
 import { convertFile } from 'xsd-to-jsonschema/node';
-
-function decimal(value) {
-  const [mantissa, exponent] = value.toExponential().split('e');
-  const [whole, fraction = ''] = mantissa.split('.');
-  return [BigInt(whole + fraction), fraction.length - Number(exponent)];
-}
 
 const ajv = new Ajv2020({ strict: true, strictRequired: false, allErrors: true, ownProperties: true });
 addFormats(ajv);
@@ -35,15 +30,7 @@ ajv.addKeyword({
   keyword: 'multipleOf',
   type: 'number',
   schemaType: 'number',
-  validate(step, value) {
-    if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0) {
-      return false;
-    }
-    const [v, vScale] = decimal(value);
-    const [s, sScale] = decimal(step);
-    const scale = Math.max(vScale, sScale);
-    return (v * 10n ** BigInt(scale - vScale)) % (s * 10n ** BigInt(scale - sScale)) === 0n;
-  },
+  validate: (step, value) => isMultipleOf(value, step),
 });
 
 const { schema, problems } = convertFile('examples/order/order.xsd');
@@ -90,10 +77,10 @@ mode, see [Dates and times](output.md#dates-and-times).
 
 ## Decimal validation
 
-The custom `multipleOf` implementation compares decimal coefficients with `BigInt` instead of dividing binary
-floating-point numbers. Without it, stock Ajv can reject valid values such as `1.12` for `multipleOf: 0.01`.
-`multipleOfPrecision` can help particular values but isn't an exact replacement. The same issue affects the
-`anyOf` branches generated for combined `totalDigits` and `fractionDigits`.
+The custom `multipleOf` keyword uses `isMultipleOf` from the package, which compares decimal coefficients with `BigInt`
+instead of dividing binary floating-point numbers. Without it, stock Ajv can reject valid values such as `1.12` for
+`multipleOf: 0.01`. `multipleOfPrecision` can help particular values but isn't an exact replacement. The same issue
+affects the `anyOf` branches generated for combined `totalDigits` and `fractionDigits`.
 
 Because the check starts from the decimal representation of an already parsed JavaScript number, it remains subject
 to the converter's [numeric precision limits](output.md#limits).
