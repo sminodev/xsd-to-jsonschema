@@ -5,7 +5,7 @@ Release versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [unreleased]
 
-## 1.0.0
+## 1.0.0 - 2026-11-22
 
 Initial release.
 
