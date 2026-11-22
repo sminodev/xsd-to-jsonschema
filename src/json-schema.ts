@@ -59,6 +59,7 @@ export interface JsonSchema {
   prefixItems?: JsonSchema[];
   minItems?: number;
   maxItems?: number;
+  minProperties?: number;
   properties?: Record<string, JsonSchema | boolean>;
   /** closes an object with a property named `__proto__`, which Ajv leaves out of `properties` */
   propertyNames?: JsonSchema;

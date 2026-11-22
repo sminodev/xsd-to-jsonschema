@@ -8,6 +8,7 @@ import { attributeKey, elementKey, outputEntries, planKeys, renameObject } from 
 import { floatOverflow, floatValueSchema } from './value-forms.js';
 import {
   ContentModel,
+  emptyContent,
   emptyFragment,
   type Fragment,
   occurs,
@@ -65,6 +66,13 @@ interface ElementDeclaration {
   doc: SchemaDocument;
   docs: string | undefined;
   global: boolean;
+}
+
+interface TypeContent {
+  fragment: Fragment;
+  attributes: AttributeProp[];
+  /** The element wildcard of an explicit xs:anyType extension is still in effect. */
+  inheritsAnyType?: boolean;
 }
 
 /** The schema would hold more output entries than `maxOutputEntries` allows. */
@@ -424,10 +432,13 @@ export class Emitter {
         this.set.at(root.node),
       );
     }
-    const content = this.nillable(
-      decl,
-      named && typeName ? this.rootTypeAlternatives(decl, typeName, named, root) : this.declarationType(decl, true),
-    );
+    const schemaOfType =
+      named && typeName
+        ? this.typeAlternatives(decl, typeName, named, () =>
+            this.withValues(this.complexType(named.node, named.doc), root.node, undefined, this.textType(named.node)),
+          )
+        : this.declarationType(decl, true);
+    const content = this.nillable(decl, schemaOfType);
     const defs = this.definitions.buildAll();
     // The running count only stops early; the exact count of the finished schema decides.
     let total = outputEntries(content);
@@ -534,10 +545,11 @@ export class Emitter {
   private declarationType(decl: ElementDeclaration, inline = false): JsonSchema {
     const node = decl.node;
     this.checkElement(decl);
-    // An element without a type of its own in a substitution group has the type of its head.
-    const name = this.poly.typeName(node);
-    const anonymousComplex = xsChild(node, 'complexType');
-    const anonymousSimple = xsChild(node, 'simpleType');
+    // A substitution member without a type of its own takes its head's type, including an anonymous type.
+    const owner = this.poly.typeOwner(node);
+    const name = this.poly.typeName(owner);
+    const anonymousComplex = xsChild(owner, 'complexType');
+    const anonymousSimple = xsChild(owner, 'simpleType');
     let schema: JsonSchema;
     let valueType: SimpleTypeRef | undefined;
     let textType: SimpleTypeRef | undefined;
@@ -545,44 +557,33 @@ export class Emitter {
       return this.withValues(this.anyTypeSchema(decl), node, { ns: XS, local: 'anySimpleType' });
     }
     if (name !== undefined) {
-      schema = this.typeRef(name, node);
       const complex = this.set.lookup('complexType', name);
       if (complex) {
-        textType = this.textType(complex.node);
-      } else if (this.set.lookup('simpleType', name) || name.ns === XS) {
+        return this.typeAlternatives(decl, name, complex, () =>
+          this.withValues(this.typeRef(name, node), node, undefined, this.textType(complex.node)),
+        );
+      }
+      schema = this.typeRef(name, node);
+      if (this.set.lookup('simpleType', name) || name.ns === XS) {
         valueType = name;
-        if (name.ns === XS && name.local !== 'anyType' && name.local !== 'anySimpleType') {
+        if (name.ns === XS && name.local !== 'anySimpleType') {
           schema = this.withTypeName(schema, clark(name.ns, name.local));
         }
       }
-      return this.typeAlternatives(decl, name, this.withValues(schema, node, valueType, textType));
     } else if (anonymousComplex) {
       textType = this.textType(anonymousComplex);
       const id = clark(decl.ns, decl.name);
-      if (decl.global && !inline && id === this.rootId) {
-        schema = { $ref: '#' };
-      } else if (decl.global && !inline) {
-        schema = this.definitions.ref('element', id, decl.name, () => this.complexType(anonymousComplex, decl.doc));
-      } else if (this.openLocal.has(anonymousComplex) || this.openLocal.size >= MAX_INLINE_DEPTH) {
-        // A local element that contains itself through its content refers to a definition of its type; so does one
-        // nested very deep, whose definition is written later, after the stack has unwound.
-        const at = this.set.at(anonymousComplex);
-        const where = `${at.file ?? ''}:${anonymousComplex.lineNumber ?? 0}:${anonymousComplex.columnNumber ?? 0}`;
-        const depth = this.localBase + this.openLocal.size;
-        if (depth >= MAX_LOCAL_DEPTH) {
-          throw new RangeError(`local element types nest deeper than ${MAX_LOCAL_DEPTH} levels`);
-        }
-        schema = this.definitions.ref('local', `${id} ${where}`, decl.name, () => {
-          const saved = this.localBase;
-          this.localBase = depth;
-          try {
-            return this.localComplexType(anonymousComplex, decl.doc);
-          } finally {
-            this.localBase = saved;
-          }
-        });
+      if (decl.global) {
+        const typeDoc = this.set.documentOf(owner) ?? decl.doc;
+        const ownerName = attr(owner, 'name') ?? decl.name;
+        const ownerId = clark(typeDoc.targetNamespace, ownerName);
+        schema = inline
+          ? this.complexType(anonymousComplex, typeDoc)
+          : id === this.rootId
+            ? { $ref: '#' }
+            : this.definitions.ref('element', ownerId, ownerName, () => this.complexType(anonymousComplex, typeDoc));
       } else {
-        schema = this.localComplexType(anonymousComplex, decl.doc);
+        schema = this.localElementType(anonymousComplex, decl, id);
       }
     } else if (anonymousSimple) {
       schema = this.simple.schema(anonymousSimple);
@@ -591,6 +592,28 @@ export class Emitter {
       schema = {};
     }
     return this.withValues(schema, node, valueType, textType);
+  }
+
+  private localElementType(node: Element, decl: ElementDeclaration, id: string): JsonSchema {
+    const depth = this.localBase + this.openLocal.size;
+    if (depth >= MAX_LOCAL_DEPTH) {
+      throw new RangeError(`local element types nest deeper than ${MAX_LOCAL_DEPTH} levels`);
+    }
+    if (!this.openLocal.has(node) && this.openLocal.size < MAX_INLINE_DEPTH) {
+      return this.localComplexType(node, decl.doc);
+    }
+    // Self-references and deeply nested local types use definitions built after the stack has unwound.
+    const at = this.set.at(node);
+    const where = `${at.file ?? ''}:${node.lineNumber ?? 0}:${node.columnNumber ?? 0}`;
+    return this.definitions.ref('local', `${id} ${where}`, decl.name, () => {
+      const saved = this.localBase;
+      this.localBase = depth;
+      try {
+        return this.localComplexType(node, decl.doc);
+      } finally {
+        this.localBase = saved;
+      }
+    });
   }
 
   /** The anonymous complex type of a local element, marked as open while it is written. */
@@ -666,80 +689,41 @@ export class Emitter {
     }
   }
 
-  /**
-   * The root's named type in place, with the types xsi:type may select. The own object of an abstract type is dropped
-   * when types derive from it, so its entries are kept apart; if none do, they only stay out of the early stop.
-   */
-  private rootTypeAlternatives(decl: ElementDeclaration, type: QName, named: Component, root: Component): JsonSchema {
-    const abstract = booleanOf(attr(named.node, 'abstract')) === true;
-    const mark = abstract ? this.leaveOut() : 0;
-    let own: JsonSchema | undefined;
-    try {
-      own = this.withValues(this.complexType(named.node, named.doc), root.node, undefined, this.textType(named.node));
-    } finally {
-      if (abstract) {
-        this.leftOut(mark, own);
-      }
-    }
-    return this.typeAlternatives(decl, type, own);
-  }
-
-  /**
-   * The schema of an element of a named or built-in type, with the types xsi:type may select. A complex type is an
-   * `anyOf` of its own definition, unless it is abstract, and the definitions of its derived types, which require
-   * `#type`; without derived types it stays as it is. A simple type stays as it is.
-   */
-  private typeAlternatives(decl: ElementDeclaration, type: QName, schema: JsonSchema): JsonSchema {
-    const alternatives = this.typeChoices(decl, type);
-    if (alternatives === undefined) {
-      return schema;
-    }
+  /** The concrete schemas an element can have, including its own type if it is concrete. */
+  private typeAlternatives(
+    decl: ElementDeclaration,
+    type: QName,
+    complex: Component,
+    ownSchema: () => JsonSchema,
+  ): JsonSchema {
+    const abstract = booleanOf(attr(complex.node, 'abstract')) === true;
+    const own = abstract ? undefined : ownSchema();
     const id = clark(type.ns, type.local);
-    const complex = this.set.lookup('complexType', type);
-    if (complex) {
-      const abstract = booleanOf(attr(complex.node, 'abstract')) === true;
-      const others = alternatives.filter((alternative) => alternative.id !== id);
-      if (others.length === 0) {
-        if (abstract) {
-          this.problems.error(
-            'unsupported-element',
-            `${decl.name} has the abstract type ${type.local}, and no type derives from it`,
-            this.set.at(decl.node),
-          );
-        }
-        return schema;
+    const others = this.typeChoices(decl, type, complex).filter((alternative) => alternative.id !== id);
+    if (others.length === 0) {
+      if (own) {
+        return own;
       }
-      // Each use of a type lists the types derived from it: counted before they are made.
-      const count = others.length + (abstract ? 0 : 1);
-      this.reserve(count);
-      const constrained = attr(decl.node, 'fixed') !== undefined || attr(decl.node, 'default') !== undefined;
-      const branches = others.map((alternative) => this.typeBranch(alternative, decl.node, constrained));
-      // An abstract type has no object of its own; the one made for it is left out.
-      if (abstract) {
-        this.discarded(schema);
-      }
-      const anyOf = abstract ? branches : [schema, ...branches];
-      this.counted.set(anyOf, count);
-      return { anyOf };
+      this.problems.error(
+        'unsupported-element',
+        `${decl.name} has the abstract type ${type.local}, and no concrete derived type is allowed`,
+        this.set.at(decl.node),
+      );
+      return { not: {} };
     }
-    // A simple type has no object form: xsi:type may only name the declared type, which `xml.type` records.
-    return schema;
+    // Each use of a type lists the types derived from it: count their branches before making them.
+    const count = others.length + (own ? 1 : 0);
+    this.reserve(count);
+    const constrained = attr(decl.node, 'fixed') !== undefined || attr(decl.node, 'default') !== undefined;
+    const branches = others.map((alternative) => this.typeBranch(alternative, decl.node, constrained));
+    const anyOf = own ? [own, ...branches] : branches;
+    this.counted.set(anyOf, count);
+    return { anyOf };
   }
 
-  /** The types xsi:type may select for an element of `type`; undefined for anyType, anySimpleType or an unknown type. */
-  private typeChoices(decl: ElementDeclaration, type: QName): TypeAlternative[] | undefined {
-    if (type.ns === XS && (type.local === 'anyType' || type.local === 'anySimpleType')) {
-      return undefined;
-    }
-    const complex = this.set.lookup('complexType', type);
-    if (!complex && !this.set.lookup('simpleType', type) && type.ns !== XS) {
-      return undefined;
-    }
-    // The element and its type can block derivation methods, in their own block attribute or the schema's blockDefault.
-    const blocked = new Set([
-      ...blockedBy(decl.node, decl.doc),
-      ...(complex ? blockedBy(complex.node, complex.doc) : []),
-    ]);
+  /** The concrete types xsi:type may select for an element of a named complex type. */
+  private typeChoices(decl: ElementDeclaration, type: QName, complex: Component): TypeAlternative[] {
+    const blocked = new Set([...blockedBy(decl.node, decl.doc), ...blockedBy(complex.node, complex.doc)]);
     return this.poly.alternatives(type, blocked);
   }
 
@@ -905,7 +889,7 @@ export class Emitter {
     const { attributes, anyAttribute } = this.declaredAttributes(decl);
     const type = this.poly.typeName(decl.node);
     const declared = type && this.set.lookup('complexType', type);
-    const alternatives = (declared && type && this.typeChoices(decl, type)) || [];
+    const alternatives = declared && type ? this.typeChoices(decl, type, declared) : [];
     const declaredId = type && clark(type.ns, type.local);
     const abstract = declared !== undefined && booleanOf(attr(declared.node, 'abstract')) === true;
     if (!abstract && !attributes.some((a) => a.required)) {
@@ -925,7 +909,8 @@ export class Emitter {
       const complex = own ? undefined : this.set.lookup('complexType', alternative.name);
       const typed = complex ? this.typeAttributes(complex.node, complex.doc, new Set()) : { attributes, anyAttribute };
       const typePlan = complex ? this.keyPlanOf(complex.node, complex.doc) : plan;
-      const form = this.nilForm(decl, typed.attributes, typed.anyAttribute, typePlan, alternative.id, !own);
+      const needsType = !own || (typed.attributes.length === 0 && !typed.anyAttribute);
+      const form = this.nilForm(decl, typed.attributes, typed.anyAttribute, typePlan, alternative.id, needsType);
       if (form) {
         this.made(form);
         forms.push(form);
@@ -967,6 +952,10 @@ export class Emitter {
     properties[key] = this.options.xml ? { type: 'null', xml: { text: true } } : { type: 'null' };
     required.push(key);
     const form: JsonSchema = { type: 'object', properties, required };
+    if (required.length === 1) {
+      // An object represents a nil element only when it carries an attribute or an explicit xsi:type.
+      form.minProperties = 2;
+    }
     if (!anyAttribute) {
       form.additionalProperties = false;
     } else if (this.options.xml) {
@@ -976,12 +965,21 @@ export class Emitter {
     return form;
   }
 
+  /** The complex type of an element, whether named or anonymous and whether inherited or declared here. */
+  private declaredComplexType(decl: ElementDeclaration): Component | undefined {
+    const owner = this.poly.typeOwner(decl.node);
+    const name = this.poly.typeName(owner);
+    if (name !== undefined) {
+      return this.set.lookup('complexType', name);
+    }
+    const node = xsChild(owner, 'complexType');
+    return node && { node, doc: this.set.documentOf(owner) ?? decl.doc };
+  }
+
   /** The final property names of the object of an element declaration's complex type; see `planKeys`. */
   private keyPlan(decl: ElementDeclaration): Map<string, string> {
-    const typeName = this.poly.typeName(decl.node);
-    const named = typeName === undefined ? undefined : this.set.lookup('complexType', typeName);
-    const node = named?.node ?? xsChild(decl.node, 'complexType');
-    return node ? this.keyPlanOf(node, named?.doc ?? decl.doc) : new Map<string, string>();
+    const complex = this.declaredComplexType(decl);
+    return complex ? this.keyPlanOf(complex.node, complex.doc) : new Map<string, string>();
   }
 
   /** The final property names of the object of a complex type. */
@@ -1004,13 +1002,10 @@ export class Emitter {
     attributes: (AttributeProp & { prohibited?: false })[];
     anyAttribute: boolean;
   } {
-    const typeName = this.poly.typeName(decl.node);
-    const named = typeName === undefined ? undefined : this.set.lookup('complexType', typeName);
-    const anonymous = xsChild(decl.node, 'complexType');
-    if (named) {
-      return this.typeAttributes(named.node, named.doc, new Set());
-    }
-    return anonymous ? this.typeAttributes(anonymous, decl.doc, new Set()) : { attributes: [], anyAttribute: false };
+    const complex = this.declaredComplexType(decl);
+    return complex
+      ? this.typeAttributes(complex.node, complex.doc, new Set())
+      : { attributes: [], anyAttribute: false };
   }
 
   private typeAttributes(
@@ -1025,10 +1020,11 @@ export class Emitter {
     let attributes: AttributeProp[];
     let anyAttribute = false;
     if (derivation) {
-      const base = this.set.lookup('complexType', this.set.resolveQName(derivation, attr(derivation, 'base') ?? ''));
+      const baseName = this.set.resolveQName(derivation, attr(derivation, 'base') ?? '');
+      const base = this.set.lookup('complexType', baseName);
       const inherited = base && !seen.has(base.node) ? this.typeAttributes(base.node, base.doc, seen) : undefined;
       attributes = overrideAttributes(inherited?.attributes ?? [], this.attributes(derivation, doc, fragment));
-      anyAttribute = derivation.localName === 'extension' && inherited?.anyAttribute === true;
+      anyAttribute = derivation.localName === 'extension' && (inherited?.anyAttribute === true || isAnyType(baseName));
     } else {
       attributes = this.attributes(node, doc, fragment);
     }
@@ -1176,11 +1172,7 @@ export class Emitter {
   // --- complex types -------------------------------------------------------------------------------------------
 
   /** Properties and attributes of a complex type, following complexContent extensions to their bases. */
-  private content(
-    node: Element,
-    doc: SchemaDocument,
-    seen = new Set<Element>(),
-  ): { fragment: Fragment; attributes: AttributeProp[] } {
+  private content(node: Element, doc: SchemaDocument, seen = new Set<Element>()): TypeContent {
     if (seen.has(node)) {
       this.problems.error('circular-type', 'circular complex type derivation', this.set.at(node));
       return { fragment: emptyFragment(), attributes: [] };
@@ -1196,18 +1188,23 @@ export class Emitter {
     if (derivation) {
       this.checkXsd11Content(derivation);
     }
-    // mixed on complexContent decides where it is written, otherwise mixed on complexType (XML Schema 1.0, 3.4.2).
+    // An extension with no effective content of its own takes the base's content type (XML Schema 1.0, 3.4.2).
     const contentMixed = complexContent && attr(complexContent, 'mixed');
-    if (booleanOf(contentMixed !== undefined ? contentMixed : attr(node, 'mixed')) === true) {
+    const mixed = booleanOf(contentMixed ?? attr(node, 'mixed')) === true;
+    const baseQName = derivation && (attr(derivation, 'base') ?? '');
+    const baseName = derivation && this.set.resolveQName(derivation, baseQName ?? '');
+    const extendsAnyType = derivation?.localName === 'extension' && isAnyType(baseName);
+    if (mixed || (extendsAnyType && emptyContent(derivation, this.set))) {
       return this.mixedContent(node, derivation, doc, seen);
     }
-    if (derivation) {
-      const baseQName = attr(derivation, 'base') ?? '';
-      const baseName = this.set.resolveQName(derivation, baseQName);
+    if (derivation && baseName) {
       let fragment = emptyFragment();
       let attributes: AttributeProp[] = [];
       const base = this.set.lookup('complexType', baseName);
-      if (!base && !(baseName.ns === XS && baseName.local === 'anyType')) {
+      let inheritsAnyType = extendsAnyType;
+      if (extendsAnyType) {
+        this.inheritAnyTypeWildcards(fragment, derivation);
+      } else if (!base && !isAnyType(baseName)) {
         this.problems.error('unknown-type', `base type ${baseQName} is not defined`, this.set.at(derivation));
       }
       if (base && derivation.localName === 'extension') {
@@ -1216,6 +1213,7 @@ export class Emitter {
         fragment = emptyFragment(inherited.fragment.groupKeys);
         this.contentModel.merge(fragment, inherited.fragment, true);
         attributes = inherited.attributes;
+        inheritsAnyType = inherited.inheritsAnyType === true;
       } else if (base) {
         // Only its attributes are used: its objects are not written.
         this.planning += 1;
@@ -1226,7 +1224,11 @@ export class Emitter {
         }
       }
       this.contentModel.compositor(derivation, doc, fragment);
-      return { fragment, attributes: overrideAttributes(attributes, this.attributes(derivation, doc, fragment)) };
+      return {
+        fragment,
+        attributes: overrideAttributes(attributes, this.attributes(derivation, doc, fragment)),
+        inheritsAnyType,
+      };
     }
     const fragment = emptyFragment();
     this.contentModel.compositor(node, doc, fragment);
@@ -1242,7 +1244,7 @@ export class Emitter {
     derivation: Element | undefined,
     doc: SchemaDocument,
     seen: Set<Element>,
-  ): { fragment: Fragment; attributes: AttributeProp[] } {
+  ): TypeContent {
     if (this.allowsElements(node)) {
       this.problems.warning(
         'unsupported-mixed',
@@ -1252,6 +1254,7 @@ export class Emitter {
     }
     const fragment = emptyFragment();
     let attributes: AttributeProp[];
+    let inheritsAnyType = false;
     if (derivation) {
       const baseQName = attr(derivation, 'base') ?? '';
       const baseName = this.set.resolveQName(derivation, baseQName);
@@ -1267,9 +1270,16 @@ export class Emitter {
           this.planning -= 1;
         }
         inherited = content.attributes;
-        fragment.anyAttribute = derivation.localName === 'extension' && content.fragment.anyAttribute === true;
-      } else if (!(baseName.ns === XS && baseName.local === 'anyType')) {
+        if (derivation.localName === 'extension') {
+          inheritsAnyType = content.inheritsAnyType === true;
+          fragment.anyElement = inheritsAnyType;
+          fragment.anyAttribute = content.fragment.anyAttribute === true;
+        }
+      } else if (!isAnyType(baseName)) {
         this.problems.error('unknown-type', `base type ${baseQName} is not defined`, this.set.at(derivation));
+      } else if (derivation.localName === 'extension') {
+        inheritsAnyType = true;
+        this.inheritAnyTypeWildcards(fragment, derivation);
       }
       attributes = overrideAttributes(inherited, this.attributes(derivation, doc, fragment));
     } else {
@@ -1280,8 +1290,21 @@ export class Emitter {
       text.xml = { text: true, mixed: true };
     }
     fragment.props.push({ key: this.options.textProperty, schema: text, node });
-    fragment.required.push(this.options.textProperty);
-    return { fragment, attributes };
+    // The inherited wildcard also allows a JSON object of child properties when there is no mixed text.
+    if (!inheritsAnyType) {
+      fragment.required.push(this.options.textProperty);
+    }
+    return { fragment, attributes, inheritsAnyType };
+  }
+
+  private inheritAnyTypeWildcards(fragment: Fragment, derivation: Element): void {
+    fragment.anyElement = true;
+    fragment.anyAttribute = true;
+    this.problems.warning(
+      'unsupported-any',
+      'xs:anyType contributes element and attribute wildcards that accept other properties without checking them',
+      this.set.at(derivation),
+    );
   }
 
   /** Whether the content of a complex type can hold an element: its own particles or those it extends. */
@@ -1298,8 +1321,9 @@ export class Emitter {
     if (derivation?.localName !== 'extension') {
       return false;
     }
-    const base = this.set.lookup('complexType', this.set.resolveQName(derivation, attr(derivation, 'base') ?? ''));
-    return base !== undefined && this.allowsElements(base.node, seen);
+    const baseName = this.set.resolveQName(derivation, attr(derivation, 'base') ?? '');
+    const base = this.set.lookup('complexType', baseName);
+    return isAnyType(baseName) || (base !== undefined && this.allowsElements(base.node, seen));
   }
 
   /** Whether the particles of a type, derivation, model group or group definition contain an element or xs:any. */
@@ -1474,6 +1498,10 @@ export class Emitter {
     this.recorder?.object(node, plan, fragment.groupKeys);
     return schema;
   }
+}
+
+function isAnyType(name: QName | undefined): boolean {
+  return name?.ns === XS && name.local === 'anyType';
 }
 
 /** How many anonymous complex types of local elements are written in place, one inside the other. */

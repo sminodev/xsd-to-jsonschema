@@ -181,6 +181,10 @@ function renameConstraints(
       const from = part.properties;
       part.properties = Object.fromEntries(Object.entries(from).map(([key, v]) => [rename(key), v]));
       moved?.(from, part.properties);
+      if (Object.hasOwn(part.properties, '__proto__') && part.properties['__proto__'] === false) {
+        // Ajv skips this property in `properties`. Check the names for the same exclusion.
+        part.propertyNames = { not: { const: '__proto__' } };
+      }
     }
     renameConstraints(part, plan, moved);
   }

@@ -1820,6 +1820,38 @@ describe('convert: XML Schema and JSON Schema agree', () => {
     expect(verdicts.find((v) => v.name === 'notNil')?.value).toEqual(expected);
   });
 
+  it.each(['', ' mixed="false"', ' mixed="true"'])(
+    'inherits mixed content and attributes from anyType%s',
+    async (mixed) => {
+      const files = {
+        'any-type.xsd': schema(`
+        <xs:element name="Root" nillable="true"><xs:complexType><xs:complexContent${mixed}>
+          <xs:extension base="xs:anyType"><xs:attribute name="id" type="xs:int" use="required"/></xs:extension>
+        </xs:complexContent></xs:complexType></xs:element>`),
+      };
+      const { schema: out, verdicts } = await check(files, {
+        markup: [instance('before <extra/> after', 'id="1" note="x"'), true],
+        empty: [instance('', 'id="1"'), true],
+        missingAttribute: [instance('plain text'), false],
+        badAttribute: [instance('plain text', 'id="wrong"'), false],
+        nil: [
+          instance('', 'id="1" note="x" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true"'),
+          true,
+        ],
+      });
+      expect(out.anyOf?.[0]).toMatchObject({
+        xml: { anyAttribute: true },
+        properties: { value: { type: 'string', xml: { text: true, mixed: true } } },
+      });
+      expect(verdicts.find((v) => v.name === 'markup')?.value).toEqual({
+        id: 1,
+        note: 'x',
+        value: 'before <extra xmlns="urn:t"/> after',
+      });
+      expect(verdicts.find((v) => v.name === 'nil')?.value).toEqual({ id: 1, note: 'x', value: null });
+    },
+  );
+
   it('on wildcard content: written without a schema, and #unknown outside wildcards', async () => {
     const files = {
       'any.xsd': schema(`
@@ -1937,6 +1969,39 @@ describe('convert: XML Schema and JSON Schema agree', () => {
       'Closed',
       'Plain',
     ]);
+  });
+
+  it('uses an anonymous head type for members without a declared type', async () => {
+    const files = {
+      'member.xsd': schema(`
+        <xs:element name="Head" block="restriction"><xs:complexType>
+          <xs:sequence><xs:element name="x" type="xs:int"/></xs:sequence>
+          <xs:attribute name="id" type="xs:string" use="required"/>
+        </xs:complexType></xs:element>
+        <xs:element name="Sub" substitutionGroup="Head" nillable="true"/>
+        <xs:element name="SimpleHead"><xs:simpleType><xs:restriction base="xs:int">
+          <xs:minInclusive value="1"/>
+        </xs:restriction></xs:simpleType></xs:element>
+        <xs:element name="SimpleMember" substitutionGroup="SimpleHead"/>
+        <xs:element name="Root"><xs:complexType><xs:sequence>
+          <xs:element ref="Head" minOccurs="0"/>
+          <xs:element ref="SimpleHead" minOccurs="0"/>
+        </xs:sequence></xs:complexType></xs:element>`),
+    };
+    const xsi = 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"';
+    const { schema: out, verdicts } = await check(files, {
+      sub: [instance('<Sub id="a"><x>2</x></Sub>'), true],
+      emptySub: [instance('<Sub id="a"/>'), false],
+      badSub: [instance('<Sub id="a"><x>bad</x></Sub>'), false],
+      nilSub: [instance('<Sub id="a" xsi:nil="true"/>', xsi), true],
+      missingNilAttribute: [instance('<Sub xsi:nil="true"/>', xsi), false],
+      simpleMember: [instance('<SimpleMember>1</SimpleMember>'), true],
+      simpleFacet: [instance('<SimpleMember>0</SimpleMember>'), false],
+    });
+    expect(Object.keys(out.$defs ?? {})).toEqual(['Head']);
+    expect(verdicts.find((v) => v.name === 'sub')?.value).toEqual({ Sub: { id: 'a', x: 2 } });
+    expect(verdicts.find((v) => v.name === 'nilSub')?.value).toEqual({ Sub: { id: 'a', value: null } });
+    expect(verdicts.find((v) => v.name === 'simpleMember')?.value).toEqual({ SimpleMember: 1 });
   });
 
   it('on xsi:type: a derived type in #type, an abstract type, and the declared type named on its own', async () => {

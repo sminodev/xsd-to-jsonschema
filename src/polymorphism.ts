@@ -16,8 +16,34 @@ import {
   xsChildren,
 } from './schema-set.js';
 
+const ANY_TYPE = clark(XS, 'anyType');
+const ANY_SIMPLE_TYPE = { ns: XS, local: 'anySimpleType' };
+
 /** The built-in simple types derived by restriction from another built-in type (XML Schema Part 2, 3.3). */
 const BUILTIN_BASE: Record<string, string> = {
+  anySimpleType: 'anyType',
+  string: 'anySimpleType',
+  boolean: 'anySimpleType',
+  decimal: 'anySimpleType',
+  float: 'anySimpleType',
+  double: 'anySimpleType',
+  duration: 'anySimpleType',
+  dateTime: 'anySimpleType',
+  time: 'anySimpleType',
+  date: 'anySimpleType',
+  gYearMonth: 'anySimpleType',
+  gYear: 'anySimpleType',
+  gMonthDay: 'anySimpleType',
+  gDay: 'anySimpleType',
+  gMonth: 'anySimpleType',
+  hexBinary: 'anySimpleType',
+  base64Binary: 'anySimpleType',
+  anyURI: 'anySimpleType',
+  QName: 'anySimpleType',
+  NOTATION: 'anySimpleType',
+  NMTOKENS: 'anySimpleType',
+  IDREFS: 'anySimpleType',
+  ENTITIES: 'anySimpleType',
   normalizedString: 'string',
   token: 'normalizedString',
   language: 'token',
@@ -113,7 +139,8 @@ export class Polymorphism {
     if (blocked.has('substitution')) {
       return out;
     }
-    const headType = this.typeOf(head.node);
+    const headOwner = this.typeOwner(head.node);
+    const headType = this.typeOf(headOwner);
     // The block of the head's complex type, or the blockDefault of its schema, applies to its derived types.
     const headComplex = headType === undefined ? undefined : this.set.components.complexType.get(headType);
     for (const method of headComplex ? blockedBy(headComplex.node, headComplex.doc) : []) {
@@ -129,8 +156,13 @@ export class Polymorphism {
           continue;
         }
         seen.add(memberId);
-        const methods = this.memberMethods(member.node, headType);
-        if (!methods.some((method) => blocked.has(method)) && booleanOf(attr(member.node, 'abstract')) !== true) {
+        const owner = this.typeOwner(member.node);
+        const methods = owner === headOwner ? [] : this.memberMethods(owner, headType);
+        if (
+          methods &&
+          !methods.some((method) => blocked.has(method)) &&
+          booleanOf(attr(member.node, 'abstract')) !== true
+        ) {
           out.push(member);
         }
         visit(memberId);
@@ -141,30 +173,48 @@ export class Polymorphism {
   }
 
   /** The type an element declaration names, or takes from the head of its substitution group; undefined if anonymous. */
-  typeName(node: Element, seen = new Set<Element>()): QName | undefined {
-    const type = attr(node, 'type');
-    if (type !== undefined) {
-      return this.set.resolveQName(node, type);
+  typeName(node: Element): QName | undefined {
+    return this.namedType(this.typeOwner(node));
+  }
+
+  private namedType(owner: Element): QName | undefined {
+    const type = attr(owner, 'type');
+    return type === undefined ? undefined : this.set.resolveQName(owner, type);
+  }
+
+  /** The element that supplies the type, either directly or through substitution-group affiliation. */
+  typeOwner(node: Element): Element {
+    const seen = new Set<Element>();
+    while (!seen.has(node)) {
+      seen.add(node);
+      if (attr(node, 'type') !== undefined || xsChild(node, 'complexType') || xsChild(node, 'simpleType')) {
+        break;
+      }
+      const head = (attr(node, 'substitutionGroup') ?? '').split(/[ \t\n\r]+/).find((q) => q.length > 0);
+      const found = head === undefined ? undefined : this.set.lookup('element', this.set.resolveQName(node, head));
+      if (!found) {
+        break;
+      }
+      node = found.node;
     }
-    if (xsChild(node, 'complexType') || xsChild(node, 'simpleType') || seen.has(node)) {
-      return undefined;
-    }
-    seen.add(node);
-    const head = (attr(node, 'substitutionGroup') ?? '').split(/[ \t\n\r]+/).find((q) => q.length > 0);
-    const found = head === undefined ? undefined : this.set.lookup('element', this.set.resolveQName(node, head));
-    return found ? this.typeName(found.node, seen) : undefined;
+    return node;
   }
 
   private build(): void {
     if (this.derived !== undefined) {
       return;
     }
-    this.derived = new Map();
-    this.bases = new Map();
+    const derived = (this.derived = new Map<string, Derivation[]>());
+    const bases = (this.bases = new Map<string, Derivation>());
     this.members = new Map();
     const add = (base: string, id: string, method: string): void => {
-      this.derived?.set(base, [...(this.derived.get(base) ?? []), { id, method }]);
-      this.bases?.set(id, { id: base, method });
+      const alternatives = derived.get(base);
+      if (alternatives) {
+        alternatives.push({ id, method });
+      } else {
+        derived.set(base, [{ id, method }]);
+      }
+      bases.set(id, { id: base, method });
     };
     for (const [id, { node }] of this.set.components.complexType) {
       const content = xsChild(node, 'complexContent') ?? xsChild(node, 'simpleContent');
@@ -173,13 +223,13 @@ export class Polymorphism {
       if (derivation && base !== undefined) {
         const name = this.set.resolveQName(derivation, base);
         add(clark(name.ns, name.local), id, derivation.localName ?? '');
+      } else {
+        add(ANY_TYPE, id, 'restriction');
       }
     }
     for (const [id, { node }] of this.set.components.simpleType) {
       const base = this.simpleBase(node);
-      if (base) {
-        add(clark(base.ns, base.local), id, 'restriction');
-      }
+      add(clark(base.ns, base.local), id, 'restriction');
     }
     for (const [local, base] of Object.entries(BUILTIN_BASE)) {
       add(clark(XS, base), clark(XS, local), 'restriction');
@@ -196,17 +246,17 @@ export class Polymorphism {
   }
 
   /** The named base of a simple type defined by restriction, through anonymous types written in place. */
-  private simpleBase(node: Element): QName | undefined {
+  private simpleBase(node: Element): QName {
     const restriction = xsChild(node, 'restriction');
     if (!restriction) {
-      return undefined;
+      return ANY_SIMPLE_TYPE;
     }
     const base = attr(restriction, 'base');
     if (base !== undefined) {
       return this.set.resolveQName(restriction, base);
     }
     const inner = xsChild(restriction, 'simpleType');
-    return inner ? this.simpleBase(inner) : undefined;
+    return inner ? this.simpleBase(inner) : ANY_SIMPLE_TYPE;
   }
 
   private alternative(id: string): TypeAlternative | undefined {
@@ -237,36 +287,48 @@ export class Polymorphism {
       });
   }
 
-  /** The type of an element declaration as an expanded name, for derivation checks; undefined if anonymous. */
-  private typeOf(node: Element): string | undefined {
-    const name = this.typeName(node);
-    return name && clark(name.ns, name.local);
+  /** The effective named type of an element, including the implicit xs:anyType. */
+  private typeOf(owner: Element): string | undefined {
+    const name = this.namedType(owner);
+    if (name) {
+      return clark(name.ns, name.local);
+    }
+    return xsChild(owner, 'complexType') || xsChild(owner, 'simpleType') ? undefined : ANY_TYPE;
   }
 
-  /**
-   * The derivation methods from the type of an element declaration up to `base`. An anonymous type adds the method
-   * of its own derivation to those from its base.
-   */
-  private memberMethods(node: Element, base: string | undefined): string[] {
-    const named = this.typeOf(node);
+  /** The methods in a member's type derivation, starting with the method of its anonymous type where present. */
+  private memberMethods(owner: Element, base: string | undefined): string[] | undefined {
+    const named = this.typeOf(owner);
     if (named !== undefined) {
       return this.methodsBetween(named, base);
     }
-    const anonymous = xsChild(node, 'complexType') ?? xsChild(node, 'simpleType');
-    const content = anonymous && (xsChild(anonymous, 'complexContent') ?? xsChild(anonymous, 'simpleContent'));
-    const derivation = content ? xsChildren(content)[0] : anonymous && xsChild(anonymous, 'restriction');
+    const complex = xsChild(owner, 'complexType');
+    const simple = xsChild(owner, 'simpleType');
+    if (simple) {
+      const name = this.simpleBase(simple);
+      const inherited = this.methodsBetween(clark(name.ns, name.local), base);
+      return inherited && ['restriction', ...inherited];
+    }
+    const content = complex && (xsChild(complex, 'complexContent') ?? xsChild(complex, 'simpleContent'));
+    const derivation = content && xsChildren(content)[0];
     const own = derivation && attr(derivation, 'base');
     if (!derivation || own === undefined) {
-      return [];
+      return base === ANY_TYPE ? ['restriction'] : [];
     }
     const name = this.set.resolveQName(derivation, own);
-    return [derivation.localName ?? '', ...this.methodsBetween(clark(name.ns, name.local), base)];
+    const inherited = this.methodsBetween(clark(name.ns, name.local), base);
+    return inherited && [derivation.localName ?? '', ...inherited];
   }
 
-  /** The derivation methods on the way from `type` up to `base`; none if `type` doesn't derive from `base`. */
-  private methodsBetween(type: string | undefined, base: string | undefined): string[] {
+  /** The derivation methods up to the base; undefined when the chain is circular. */
+  private methodsBetween(type: string, base: string | undefined): string[] | undefined {
     const methods: string[] = [];
-    for (let id = type, steps = 0; id !== undefined && id !== base && steps < 100; steps += 1) {
+    const seen = new Set<string>();
+    for (let id = type; id !== base;) {
+      if (seen.has(id)) {
+        return undefined;
+      }
+      seen.add(id);
       const step = this.bases?.get(id);
       if (!step) {
         return [];

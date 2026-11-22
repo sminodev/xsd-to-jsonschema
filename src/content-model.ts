@@ -127,6 +127,63 @@ export function occurs(node: Element): { min: number; max: number } {
   };
 }
 
+/** Whether the derivation adds no content particle, including through group references. */
+export function emptyContent(derivation: Element, set: SchemaSet): boolean {
+  const model = xsChildren(derivation).find((child) =>
+    ['sequence', 'all', 'choice', 'group'].includes(child.localName ?? ''),
+  );
+  if (!model) {
+    return true;
+  }
+  const pending: { particle: Element; finishing: boolean }[] = [{ particle: model, finishing: false }];
+  const open = new Set<Element>();
+  const empty = new Set<Element>();
+  while (pending.length > 0) {
+    const { particle, finishing } = pending.pop()!;
+    if (finishing) {
+      open.delete(particle);
+      empty.add(particle);
+      continue;
+    }
+    const { min, max } = occurs(particle);
+    if (max === 0 || empty.has(particle)) {
+      continue;
+    }
+    if (open.has(particle)) {
+      return false;
+    }
+    let parts: Element[];
+    if (particle.localName === 'group') {
+      const group = set.lookupRef('group', set.resolveQName(particle, attr(particle, 'ref') ?? ''), particle);
+      const child = group && xsChildren(group.node)[0];
+      if (!child) {
+        return false;
+      }
+      parts = [child];
+    } else {
+      parts = xsChildren(particle);
+      switch (particle.localName) {
+        case 'choice':
+          if (parts.length > 0 || min !== 0) {
+            return false;
+          }
+          break;
+        case 'all':
+        case 'sequence':
+          break;
+        default:
+          return false;
+      }
+    }
+    open.add(particle);
+    pending.push({ particle, finishing: true });
+    for (const child of parts) {
+      pending.push({ particle: child, finishing: false });
+    }
+  }
+  return true;
+}
+
 /** Writes the choices of a fragment into an object schema: one `oneOf` directly, several as an `allOf`. */
 export function addConstraints(schema: JsonSchema, constraints: JsonSchema[]): void {
   const [only] = constraints;
@@ -546,10 +603,10 @@ export class ContentModel {
     }
     const keys: string[] = [];
     for (const member of members) {
-      // Each member alone may occur up to maxOccurs times; at least one of them as often as minOccurs says.
+      // The particle may use any member. A member that appears has at least one occurrence of its own.
       const prop = this.property(member.node, member.doc, child, (made) => {
-        const occurrences = made.occurrences && { ...made.occurrences, min: 0, optional: true };
-        return occurrences && { ...made, schema: occurrences.array(0, max), occurrences };
+        const occurrences = made.occurrences && { ...made.occurrences, min: 1, optional: true };
+        return occurrences && { ...made, schema: occurrences.array(1, max), occurrences };
       });
       if (!prop) {
         continue;
@@ -567,6 +624,9 @@ export class ContentModel {
         alternatives.push(none);
       }
       const constraint: JsonSchema = { anyOf: alternatives };
+      if (min === 0) {
+        this.optionalChoices.add(constraint);
+      }
       this.counted(constraint, fragment.groupKeys);
       fragment.constraints.push(constraint);
     }
@@ -1193,9 +1253,10 @@ export class ContentModel {
       return;
     }
     // The array keeps the item of the first particle; the second particle's own schema, the same, is left out.
-    const min = certain(own) + certain(other);
+    const required = certain(own) + certain(other);
+    const min = required || Math.min(own.min, other.min);
     const max = own.max + other.max;
-    existing.occurrences = { ...own, min, max, optional: false };
+    existing.occurrences = { ...own, min, max, optional: required === 0 };
     existing.schema = own.array(min, max);
     this.counter.discarded(prop.schema);
     this.relax(fragment, prop);

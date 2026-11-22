@@ -566,6 +566,198 @@ describe('convert', () => {
     });
   });
 
+  describe('optional repeated substitution groups', () => {
+    const repeated = '<xs:element ref="Head" minOccurs="0" maxOccurs="2"/>';
+    const convertGroup = (model: string) =>
+      convert({
+        files: {
+          'a.xsd': schema(`
+            <xs:element name="Head" type="xs:int" abstract="true"/>
+            <xs:element name="One" substitutionGroup="Head"/>
+            <xs:element name="Two" substitutionGroup="Head"/>
+            <xs:element name="A"><xs:complexType>${model}</xs:complexType></xs:element>`),
+        },
+        entry: 'a.xsd',
+        root: 'A',
+      });
+
+    it.each([
+      ['choice', `<xs:choice>${repeated}<xs:element name="Other" type="xs:int" minOccurs="0"/></xs:choice>`],
+      ['optional sequence', `<xs:sequence minOccurs="0">${repeated}</xs:sequence>`],
+    ])('accepts an empty %s and requires entries in a member array', (_name, model) => {
+      const { schema: out, problems } = convertGroup(model);
+      expect(problems).toEqual([]);
+      const validate = ajvFor(out ?? {});
+      expect(validate({})).toBe(true);
+      expect(validate({ One: [1] })).toBe(true);
+      expect(validate({ One: [1], Two: [2] })).toBe(true);
+      expect(validate({ One: [] })).toBe(false);
+      expect(validate({ One: [1, 2, 3] })).toBe(false);
+      expect(validate({ One: [1], Other: 2 })).toBe(false);
+    });
+
+    it('allows the repeated sequence to be absent when its substitution particle is optional', () => {
+      const { schema: out, problems } = convertGroup(
+        `<xs:sequence minOccurs="2" maxOccurs="3">${repeated}</xs:sequence>`,
+      );
+      expect(problems).toEqual([]);
+      const validate = ajvFor(out ?? {});
+      expect(validate({})).toBe(true);
+      expect(validate({ '#sequence': [{ One: [1] }] })).toBe(true);
+      expect(validate({ '#sequence': [{ One: [] }] })).toBe(false);
+    });
+
+    it('keeps a member array nonempty when two separated substitution particles share it', () => {
+      const { schema: out, problems } = convertGroup(
+        `<xs:sequence>${repeated}<xs:element name="Separator" type="xs:int"/>${repeated}</xs:sequence>`,
+      );
+      expect(problems.every(({ code }) => code === 'approximated-occurrences')).toBe(true);
+      const validate = ajvFor(out ?? {});
+      expect(validate({ Separator: 0 })).toBe(true);
+      expect(validate({ Separator: 0, One: [1] })).toBe(true);
+      expect(validate({ Separator: 0, One: [] })).toBe(false);
+    });
+  });
+
+  describe('complex type and substitution alternatives', () => {
+    const run = (body: string) => convert({ files: { 'a.xsd': schema(body) }, entry: 'a.xsd', root: 'A' });
+
+    it('does not write a definition for an abstract type used only through derived alternatives', () => {
+      const { schema: out, problems } = run(`
+        <xs:complexType name="Base" abstract="true"><xs:attribute name="id" type="xs:int" use="required"/></xs:complexType>
+        <xs:complexType name="Derived"><xs:complexContent><xs:extension base="Base"/></xs:complexContent></xs:complexType>
+        <xs:element name="A"><xs:complexType><xs:sequence><xs:element name="Item" type="Base"/></xs:sequence></xs:complexType></xs:element>`);
+      expect(problems).toEqual([]);
+      expect(Object.keys(out?.$defs ?? {})).toEqual(['Derived']);
+      const validate = ajvFor(out ?? {});
+      expect(validate({ Item: { '#type': '{urn:t}Derived', id: 1 } })).toBe(true);
+      expect(validate({ Item: { id: 1 } })).toBe(false);
+    });
+
+    it('rejects instances of an abstract type when derivation is blocked', () => {
+      const { schema: out, problems } = run(`
+        <xs:complexType name="Base" abstract="true"/>
+        <xs:complexType name="Derived"><xs:complexContent><xs:extension base="Base"/></xs:complexContent></xs:complexType>
+        <xs:element name="A" type="Base" nillable="true" block="extension"/>`);
+      expect(codes(problems)).toEqual(['unsupported-element']);
+      expect(out?.$defs).toBeUndefined();
+      const validate = ajvFor(out ?? {});
+      expect(validate({})).toBe(false);
+      expect(validate({ '#type': '{urn:t}Derived' })).toBe(false);
+      expect(validate(null)).toBe(false);
+    });
+
+    it.each(['', ' type="xs:anyType"'])('applies restriction blocking to an anyType head%s', (type) => {
+      const { schema: out, problems } = run(`
+        <xs:complexType name="Restricted"/>
+        <xs:complexType name="Extended"><xs:complexContent><xs:extension base="xs:anyType"/></xs:complexContent></xs:complexType>
+        <xs:element name="Head"${type} block="restriction" abstract="true"/>
+        <xs:element name="Plain" type="Restricted" substitutionGroup="Head"/>
+        <xs:element name="Alias" substitutionGroup="Plain"/>
+        <xs:element name="Text" type="xs:string" substitutionGroup="Head"/>
+        <xs:element name="Inline" substitutionGroup="Head"><xs:complexType/></xs:element>
+        <xs:element name="InlineAlias" substitutionGroup="Inline"/>
+        <xs:element name="Unchanged" substitutionGroup="Head"/>
+        <xs:element name="Open" type="Extended" substitutionGroup="Head"/>
+        <xs:element name="A"><xs:complexType><xs:sequence><xs:element ref="Head"/></xs:sequence></xs:complexType></xs:element>`);
+      expect(codes(problems)).toEqual(['unsupported-any', 'unsupported-mixed', 'unsupported-any']);
+      expect(Object.keys(out?.properties ?? {})).toEqual(['Unchanged', 'Open']);
+      const validate = ajvFor(out ?? {});
+      expect(validate({ Unchanged: 'text' })).toBe(true);
+      expect(validate({ Open: { value: 'text' } })).toBe(true);
+      expect(validate({ Alias: {} })).toBe(false);
+    });
+
+    it('finds derivation methods beyond one hundred steps and stops at a cycle', () => {
+      const extensions = Array.from(
+        { length: 105 },
+        (_, i) =>
+          `<xs:complexType name="T${i + 1}"><xs:complexContent><xs:extension base="T${i}"/></xs:complexContent></xs:complexType>`,
+      ).join('');
+      const { schema: out, problems } = run(`
+        <xs:complexType name="Base"/>
+        <xs:complexType name="T0"><xs:complexContent><xs:restriction base="Base"/></xs:complexContent></xs:complexType>
+        ${extensions}
+        <xs:complexType name="Left"><xs:complexContent><xs:extension base="Right"/></xs:complexContent></xs:complexType>
+        <xs:complexType name="Right"><xs:complexContent><xs:extension base="Left"/></xs:complexContent></xs:complexType>
+        <xs:element name="Head" type="Base" block="restriction"/>
+        <xs:element name="Far" type="T105" substitutionGroup="Head"/>
+        <xs:element name="Circular" type="Left" substitutionGroup="Head"/>
+        <xs:element name="A"><xs:complexType><xs:sequence><xs:element ref="Head"/></xs:sequence></xs:complexType></xs:element>`);
+      expect(problems).toEqual([]);
+      expect(Object.keys(out?.properties ?? {})).toEqual(['Head']);
+      expect(Object.keys(out?.$defs ?? {})).toEqual(['Base']);
+    });
+  });
+
+  describe('extensions of xs:anyType', () => {
+    const files = {
+      'a.xsd': schema(`
+        <xs:complexType name="Open"><xs:complexContent mixed="false"><xs:extension base="xs:anyType">
+          <xs:attribute name="id" type="xs:string" use="required"/>
+        </xs:extension></xs:complexContent></xs:complexType>
+        <xs:complexType name="Inherited"><xs:complexContent mixed="true"><xs:extension base="Open"/></xs:complexContent></xs:complexType>
+        <xs:complexType name="Closed"><xs:complexContent mixed="true"><xs:restriction base="Inherited">
+          <xs:attribute name="id" type="xs:string" use="required"/>
+        </xs:restriction></xs:complexContent></xs:complexType>
+        <xs:element name="Direct" type="Open"/>
+        <xs:element name="Indirect" type="Inherited"/>
+        <xs:element name="Restricted" type="Closed"/>`),
+    };
+
+    it.each([true, false])('allows a wildcard object or mixed markup with xml=%s', (xml) => {
+      for (const root of ['Direct', 'Indirect']) {
+        const { schema: out, problems } = convert({ files, entry: 'a.xsd', root, options: { xml } });
+        expect(codes(problems)).toContain('unsupported-any');
+        expect(codes(problems)).toContain('unsupported-mixed');
+        const own = out?.anyOf?.[0] ?? out;
+        if (xml) {
+          expect(own?.xml).toMatchObject({ anyElement: true, anyAttribute: true });
+        } else {
+          expect(own?.xml).toBeUndefined();
+        }
+        const validate = ajvFor(out ?? {});
+        expect(validate({ id: '1', extra: '2', X: 'v' })).toBe(true);
+        expect(validate({ id: '1' })).toBe(true);
+        expect(validate({ id: '1', extra: '2', value: 'before <X/> after' })).toBe(true);
+        expect(validate({ extra: '2', X: 'v' })).toBe(false);
+        expect(validate({ id: 1, X: 'v' })).toBe(false);
+        expect(validate({ id: '1', value: 1 })).toBe(false);
+      }
+    });
+
+    it('keeps ordinary mixed text required after restriction removes the inherited wildcards', () => {
+      const { schema: out, problems } = convert({ files, entry: 'a.xsd', root: 'Restricted' });
+      expect(codes(problems)).not.toContain('unsupported-element');
+      expect(out?.xml).not.toHaveProperty('anyElement');
+      expect(out?.xml).not.toHaveProperty('anyAttribute');
+      const validate = ajvFor(out ?? {});
+      expect(validate({ id: '1', value: 'text' })).toBe(true);
+      expect(validate({ id: '1' })).toBe(false);
+      expect(validate({ id: '1', value: 'text', extra: '2' })).toBe(false);
+    });
+  });
+
+  describe('choice property names', () => {
+    it('checks exclusion of an optional element named __proto__', () => {
+      const { schema: out, problems } = convert({
+        files: {
+          'a.xsd': schema(`<xs:element name="A"><xs:complexType><xs:choice>
+            <xs:element name="__proto__" type="xs:string" minOccurs="0"/>
+            <xs:element name="Other" type="xs:string"/>
+          </xs:choice></xs:complexType></xs:element>`),
+        },
+        entry: 'a.xsd',
+      });
+      expect(problems).toEqual([]);
+      const validate = ajvFor(out ?? {});
+      expect(validate({})).toBe(true);
+      expect(validate({ ['__proto__']: 'text' })).toBe(true);
+      expect(validate({ Other: 'text' })).toBe(true);
+      expect(validate({ ['__proto__']: 'text', Other: 'text' })).toBe(false);
+    });
+  });
+
   describe('values', () => {
     it.each(['fixed', 'default'])('reports a non-finite numeric %s instead of emitting null', (kind) => {
       const { schema: out, problems } = convert({
@@ -927,6 +1119,23 @@ describe('convert', () => {
       });
     });
 
+    it('requires an attribute or explicit type in an object representing nil', () => {
+      const { schema: out, problems } = run(`
+        <xs:complexType name="Plain"/>
+        <xs:complexType name="Attrs"><xs:attribute name="note" type="xs:string"/></xs:complexType>
+        <xs:element name="A"><xs:complexType><xs:sequence>
+          <xs:element name="P" type="Plain" nillable="true" minOccurs="0"/>
+          <xs:element name="Q" type="Attrs" nillable="true" minOccurs="0"/>
+        </xs:sequence></xs:complexType></xs:element>`);
+      expect(problems).toEqual([]);
+      const validate = ajvFor(out ?? {});
+      expect(validate({ P: null, Q: null })).toBe(true);
+      expect(validate({ P: { value: null } })).toBe(false);
+      expect(validate({ Q: { value: null } })).toBe(false);
+      expect(validate({ P: { '#type': '{urn:t}Plain', value: null } })).toBe(true);
+      expect(validate({ Q: { note: 'x', value: null } })).toBe(true);
+    });
+
     it('apply fixed values to nillable roots and repeated children', () => {
       const ns = 'xmlns="urn:t" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"';
       const fixed = 'type="xs:int" nillable="true" fixed="7"';
@@ -1149,6 +1358,15 @@ describe('convert', () => {
       const depth = (value: unknown): number =>
         value !== null && typeof value === 'object' ? 1 + Math.max(0, ...Object.values(value).map(depth)) : 0;
       expect(Math.max(...Object.values(out?.$defs ?? {}).map(depth))).toBeLessThan(400);
+    });
+
+    it('allows exactly 1000 nested anonymous local types beneath the global root', () => {
+      const accepted = run(nest(1001));
+      expect(accepted.problems).toEqual([]);
+      expect(accepted.schema).toBeDefined();
+      const rejected = run(nest(1002));
+      expect(rejected.schema).toBeUndefined();
+      expect(codes(rejected.problems)).toEqual(['resource-limit']);
     });
 
     it('give no schema but resource-limit for what nests deeper than the converter can follow', () => {
