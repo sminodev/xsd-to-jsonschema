@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { checkElapsed } from './test-support/performance.js';
 import { convertFile } from './node.js';
 import { checkDoctype } from './doctype.js';
 import { ajvFor } from './test-support/oracle.js';
@@ -70,14 +71,14 @@ describe('DOCTYPE declarations in schema documents', () => {
     expect(files).toHaveLength(28);
   });
 
-  it('read a large body in linear time: 4 MiB of entity references take well under a second', () => {
+  it('distinguish predefined and declared entity references in a 4 MiB body', () => {
     const doctype = '<?xml version="1.0"?><!DOCTYPE schema [ <!ENTITY unused "x"> ]>';
     const body = '&amp;'.repeat(Math.floor((4 * 1024 * 1024 - 200) / 5));
     const text = `${doctype}<schema xmlns="http://www.w3.org/2001/XMLSchema"><annotation><documentation>${body}</documentation></annotation></schema>`;
     const started = performance.now();
     expect(checkDoctype(text).kind).toBe('neutralized');
     expect(checkDoctype(text.replace('&amp;', '&unused;')).kind).toBe('refused');
-    expect(performance.now() - started).toBeLessThan(1000);
+    checkElapsed(started, 1000);
   });
 
   it.each([

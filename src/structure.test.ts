@@ -2,6 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { checkElapsed } from './test-support/performance.js';
 import { convert, type ConvertInput, type ConvertOptions } from './convert.js';
 import { describeSchema, type DescribeSchemaResult } from './describe.js';
 import { convertFile, describeSchemaFile } from './node.js';
@@ -906,7 +907,7 @@ describe('the limit of the structure report', () => {
   it('stop a report that doubles with every level before it is built', () => {
     const started = performance.now();
     const { schema, structure, problems } = run(doubled(30));
-    expect(performance.now() - started).toBeLessThan(5000);
+    checkElapsed(started, 5000);
     expect([schema, structure]).toEqual([undefined, undefined]);
     expect(problems.map((p) => p.code)).toEqual(['resource-limit']);
   });
@@ -938,7 +939,7 @@ describe('the limit of the structure report', () => {
       undefined,
       'resource-limit',
     ]);
-    expect(performance.now() - started).toBeLessThan(5000);
+    checkElapsed(started, 5000);
   });
 
   it('give resource-limit, not a RangeError, where the report nests deeper than the stack reaches', () => {

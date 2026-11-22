@@ -1,5 +1,6 @@
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import { describe, expect, it } from 'vitest';
+import { checkElapsed } from './test-support/performance.js';
 import { convert } from './convert.js';
 import { describeSchema } from './describe.js';
 import { outputEntries } from './keys.js';
@@ -1158,14 +1159,14 @@ describe('convert', () => {
       }
     });
 
-    it('write a chain of 500 unions in well under a second, and read a value of it', () => {
+    it('read a value through a chain of 500 unions', () => {
       const started = performance.now();
       const { schema: out } = run(unionChain(500));
-      expect(performance.now() - started).toBeLessThan(1000);
+      checkElapsed(started, 1000);
       expect(xmlToJson(out ?? {}, '<r>1</r>')).toBe('1');
     });
 
-    it('write a chain of 500 unions as flat branches, which Ajv with its defaults compiles in well under a second', () => {
+    it('write a chain of 500 unions as flat branches that Ajv compiles with its default settings', () => {
       const { schema: out } = run(unionChain(500));
       const chain = out?.$defs?.['U500'];
       expect(chain?.anyOf).toHaveLength(502);
@@ -1180,7 +1181,7 @@ describe('convert', () => {
       ]) {
         const started = performance.now();
         ajv();
-        expect(performance.now() - started).toBeLessThan(1000);
+        checkElapsed(started, 1000);
       }
     });
 
@@ -1377,7 +1378,7 @@ describe('convert', () => {
       expect(doubles.schema?.enum).toEqual([[0.1, 2]]);
     });
 
-    it('convert 20,000 attributes or elements of one type in well under two seconds', () => {
+    it('convert 20,000 attributes or elements of one type', () => {
       const many = (n: number, item: (i: number) => string) => Array.from({ length: n }, (_, i) => item(i)).join('');
       for (const content of [
         many(20000, (i) => `<xs:attribute name="a${i}" type="xs:string"/>`),
@@ -1385,7 +1386,7 @@ describe('convert', () => {
       ]) {
         const started = performance.now();
         const { schema: out } = run(`<xs:element name="r"><xs:complexType>${content}</xs:complexType></xs:element>`);
-        expect(performance.now() - started).toBeLessThan(2000);
+        checkElapsed(started, 2000);
         expect(Object.keys(out?.properties ?? {})).toHaveLength(20000);
       }
     });
@@ -1481,7 +1482,7 @@ describe('convert', () => {
       // xsi:type branches are made.
       const started = performance.now();
       const big = convert({ files: { 'a.xsd': chain(1000) }, entry: 'a.xsd' });
-      expect(performance.now() - started).toBeLessThan(3000);
+      checkElapsed(started, 3000);
       expect(big.schema).toBeUndefined();
       expect(big.problems.map((p) => p.message)).toEqual([
         'the schema exceeds the limit of 200000 output entries (maxOutputEntries)',
@@ -1628,7 +1629,7 @@ describe('convert', () => {
             .map((i) => e(i))
             .join('')}</xs:sequence>`,
         );
-        expect(performance.now() - started).toBeLessThan(2000);
+        checkElapsed(started, 2000);
         expect(outputEntries(schema)).toBe(6001);
         expect(problems.every((p) => p.code === 'approximated-occurrences')).toBe(true);
       }
@@ -1647,7 +1648,7 @@ describe('convert', () => {
       for (const form of forms) {
         const started = performance.now();
         expect(run(form(3000), { maxOutputEntries: 50_000 }).problems.map((p) => p.code)).toEqual(['resource-limit']);
-        expect(performance.now() - started).toBeLessThan(2000);
+        checkElapsed(started, 2000);
         // At a width that fits, the limit decides at the finished schema.
         const free = run(form(30));
         const entries = outputEntries(free.schema);
@@ -1675,7 +1676,7 @@ describe('convert', () => {
         },
         entry: 'a.xsd',
       });
-      expect(performance.now() - started).toBeLessThan(1000);
+      checkElapsed(started, 1000);
       expect(problems).toEqual([]);
       expect(out?.properties?.['g']).toMatchObject({ type: 'array', minItems: 2 ** 29, maxItems: 2 ** 29 });
       // Each occurrence of a repeated group is an object of its own: groups that refer twice to the one below, repeated,
@@ -1693,7 +1694,7 @@ describe('convert', () => {
         },
         entry: 'a.xsd',
       });
-      expect(performance.now() - again).toBeLessThan(1000);
+      checkElapsed(again, 1000);
       expect(deep.problems).toEqual([]);
       expect(deep.schema?.properties?.['#R30']).toMatchObject({ type: 'array', maxItems: 2 });
     });
