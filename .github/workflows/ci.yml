@@ -15,8 +15,8 @@ jobs:
       matrix:
         node: ['22.13.0', '24', '26']
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -33,14 +33,14 @@ jobs:
   package-consumer:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
           cache: npm
       - run: npm ci
       - run: npm pack --pack-destination "$RUNNER_TEMP"
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22.12.0'
           package-manager-cache: false
@@ -57,8 +57,8 @@ jobs:
           import { readFileSync } from 'node:fs';
           import { createRequire } from 'node:module';
           import { dirname, join } from 'node:path';
-          import { convert } from 'xsd-to-jsonschema';
-          import { convertFile } from 'xsd-to-jsonschema/node';
+          import * as browser from 'xsd-to-jsonschema';
+          import * as node from 'xsd-to-jsonschema/node';
 
           const require = createRequire(import.meta.url);
           const example = join(dirname(require.resolve('xsd-to-jsonschema/package.json')), 'examples/order');
@@ -68,14 +68,19 @@ jobs:
           const input = { entry, files: read };
           const entryPath = join(example, entry);
 
-          for (const result of [
-            convert(input),
-            convertFile(entryPath),
-            require('xsd-to-jsonschema').convert(input),
-            require('xsd-to-jsonschema/node').convertFile(entryPath),
+          for (const [api, files] of [
+            [browser, node],
+            [require('xsd-to-jsonschema'), require('xsd-to-jsonschema/node')],
           ]) {
-            assert.equal(result.problems.some((problem) => problem.severity === 'error'), false);
-            assert.equal(JSON.stringify(result.schema, null, 2), expected);
+            const report = api.describeSchema(input);
+            assert.deepEqual(files.describeSchemaFile(entryPath), report);
+            assert.equal(report.structure.root.name, '{urn:example:order}Order');
+            for (const result of [api.convert(input), files.convertFile(entryPath), report]) {
+              assert.equal(result.problems.some((problem) => problem.severity === 'error'), false);
+              assert.equal(JSON.stringify(result.schema, null, 2), expected);
+            }
+            assert.equal(api.isMultipleOf(1.12, 0.01), true);
+            assert.equal(api.isMultipleOf(1.125, 0.01), false);
           }
 
           for (const bin of ['xsd-to-jsonschema', 'xsd2json']) {
