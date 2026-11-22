@@ -11,6 +11,10 @@ Release versions follow [Semantic Versioning](http://semver.org/spec/v2.0.0.html
   with `mixed="true"` whose `complexContent` says `mixed="false"` now has element content instead of markup, and no
   `unsupported-mixed` warning. White space around the value counts as for any `xs:boolean`: `mixed=" true "` is
   mixed.
+- Read `nillable` and `abstract` as `xs:boolean`, including XML whitespace around the value.
+- Omit nil forms for declarations with a `fixed` value. `xsi:nil="false"` still permits ordinary content, and a
+  `default` value still permits nil. Nil elements whose declared type is abstract require a concrete `xsi:type`.
+- Keep element `fixed` and `default` values when `xsi:type` selects a derived type with simple content.
 - Convert chains of 500 nested unions on Node.js 22.13.0. List and union nesting beyond 1000 levels reports
   `resource-limit`.
 - Keep U+0085, U+2028 and U+2029 in schema text: XML 1.0 ends lines with CR LF and CR only. They were read as line

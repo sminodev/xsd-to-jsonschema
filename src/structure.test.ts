@@ -380,6 +380,35 @@ describe('describeSchema', () => {
       expect(element(model, 0).typeAlternatives).toEqual(['{urn:t}Party', '{urn:t}Person', '{urn:t}Quiet']);
     });
 
+    it('reads XML whitespace around boolean attributes on elements and types', () => {
+      const xsd = schema(`
+        <xs:complexType name="Base" abstract=" &#x9;true&#xD;&#xA; "/>
+        <xs:complexType name="Derived" abstract=" &#x9;0 ">
+          <xs:complexContent><xs:extension base="Base"/></xs:complexContent>
+        </xs:complexType>
+        <xs:element name="Head" type="xs:string" abstract=" &#xA;1 "/>
+        <xs:element name="Member" substitutionGroup="Head" abstract=" false "/>
+        <xs:element name="Root"><xs:complexType><xs:sequence>
+          <xs:element ref="Head"/>
+          <xs:element name="Local" type="Base" nillable=" &#x9;1&#xD;&#xA; "/>
+          <xs:element name="Strict" type="xs:int" nillable=" &#xA;0 "/>
+        </xs:sequence></xs:complexType></xs:element>`);
+      const { structure, schema: out, problems } = report({ 'a.xsd': xsd }, 'Root');
+      expect(problems).toEqual([]);
+      expect(structure).toBeDefined();
+      const model = content(structure!);
+      expect(element(model, 0)).toMatchObject({ abstract: true, substitutes: [{ name: '{urn:t}Member' }] });
+      expect(element(model, 1)).toMatchObject({ nillable: true, typeAlternatives: ['{urn:t}Derived'] });
+      expect(element(model, 2).nillable).toBe(false);
+      expect(complex(structure!, '{urn:t}Base').abstract).toBe(true);
+      expect(complex(structure!, '{urn:t}Derived').abstract).toBe(false);
+      expect(out?.properties).toHaveProperty('Member');
+      expect(out?.properties).not.toHaveProperty('Head');
+      expect(out?.properties?.['Local']).toMatchObject({ xml: { nillable: true } });
+      expect(out?.properties?.['Strict']).not.toHaveProperty('anyOf');
+      expect(report({ 'a.xsd': xsd }, 'Head').problems.map(({ code }) => code)).toContain('unsupported-element');
+    });
+
     it('lists the members of a substitution group with their own properties', () => {
       const shape = element(model, 2);
       expect(shape).toMatchObject({ name: '{urn:t}Shape', abstract: true, global: true });

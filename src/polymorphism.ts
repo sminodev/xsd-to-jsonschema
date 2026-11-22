@@ -5,6 +5,7 @@
 import type { Element } from '@xmldom/xmldom';
 import {
   attr,
+  booleanOf,
   clark,
   type Component,
   type QName,
@@ -105,10 +106,10 @@ export class Polymorphism {
     const headId = clark(head.doc.targetNamespace, attr(head.node, 'name') ?? '');
     if (!this.members?.has(headId)) {
       // An abstract element without members can't occur at all.
-      return isTrue(attr(head.node, 'abstract')) ? [] : undefined;
+      return booleanOf(attr(head.node, 'abstract')) === true ? [] : undefined;
     }
     const blocked = new Set(blockedBy(head.node, head.doc));
-    const out: Component[] = isTrue(attr(head.node, 'abstract')) ? [] : [head];
+    const out: Component[] = booleanOf(attr(head.node, 'abstract')) === true ? [] : [head];
     if (blocked.has('substitution')) {
       return out;
     }
@@ -129,7 +130,7 @@ export class Polymorphism {
         }
         seen.add(memberId);
         const methods = this.memberMethods(member.node, headType);
-        if (!methods.some((method) => blocked.has(method)) && !isTrue(attr(member.node, 'abstract'))) {
+        if (!methods.some((method) => blocked.has(method)) && booleanOf(attr(member.node, 'abstract')) !== true) {
           out.push(member);
         }
         visit(memberId);
@@ -221,7 +222,7 @@ export class Polymorphism {
 
   private isAbstract(id: string): boolean {
     const found = this.set.components.complexType.get(id);
-    return found !== undefined && isTrue(attr(found.node, 'abstract'));
+    return found !== undefined && booleanOf(attr(found.node, 'abstract')) === true;
   }
 
   /** The named member types of a union type. */
@@ -276,8 +277,6 @@ export class Polymorphism {
     return methods;
   }
 }
-
-const isTrue = (value: string | undefined): boolean => value === 'true' || value === '1';
 
 /** The derivation methods a declaration blocks, from its block attribute or the blockDefault of its schema. */
 export function blockedBy(node: Element, doc: SchemaDocument): string[] {

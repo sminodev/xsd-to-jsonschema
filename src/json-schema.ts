@@ -16,7 +16,7 @@ export interface XmlAnnotation {
   whiteSpace?: 'replace' | 'collapse';
   /** the array holds the items of an xs:list, not repeated elements */
   list?: boolean;
-  /** the element is nillable: the property also allows its nil form */
+  /** the element is declared nillable: its anyOf starts with the content, followed by any allowed nil forms */
   nillable?: boolean;
   /** xs:any: other child elements are written without a schema */
   anyElement?: boolean;

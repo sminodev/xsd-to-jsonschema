@@ -926,6 +926,31 @@ describe('convert', () => {
       });
     });
 
+    it('apply fixed values to nillable roots and repeated children', () => {
+      const ns = 'xmlns="urn:t" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"';
+      const fixed = 'type="xs:int" nillable="true" fixed="7"';
+      const { schema: root, problems } = run(`<xs:element name="A" ${fixed}/>`);
+      expect(problems).toEqual([]);
+      const validate = ajvFor(root ?? {});
+      expect(validate(7)).toBe(true);
+      expect(validate(8)).toBe(false);
+      expect(validate(null)).toBe(false);
+      expect(xmlToJson(root ?? {}, `<A ${ns}/>`)).toBe(7);
+      expect(xmlToJson(root ?? {}, `<A ${ns} xsi:nil="false"/>`)).toBe(7);
+      expect(() => xmlToJson(root ?? {}, `<A ${ns} xsi:nil="true"/>`)).toThrow(MappingError);
+
+      const { schema: children } = run(
+        `<xs:element name="A"><xs:complexType><xs:sequence>
+          <xs:element name="F" ${fixed} maxOccurs="2"/>
+          <xs:element name="D" type="xs:int" nillable="true" default="8"/>
+        </xs:sequence></xs:complexType></xs:element>`,
+        { xml: false },
+      );
+      const validateChildren = ajvFor(children ?? {});
+      expect(validateChildren({ F: [7, 7], D: null })).toBe(true);
+      expect(validateChildren({ F: [null], D: 8 })).toBe(false);
+    });
+
     it('leave out list, nil and wildcard annotations with xml: false', () => {
       const { schema: out } = run(
         `<xs:element name="A"><xs:complexType><xs:sequence>

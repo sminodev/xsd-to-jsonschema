@@ -1715,6 +1715,9 @@ describe('convert: XML Schema and JSON Schema agree', () => {
   it('on xsi:nil: null without attributes, an object with the attributes and a null text with them', async () => {
     const files = {
       'nil.xsd': schema(`
+	<xs:complexType name="Count"><xs:simpleContent><xs:extension base="xs:int"/></xs:simpleContent></xs:complexType>
+	<xs:complexType name="Abstract" abstract="true"><xs:attribute name="tag" type="xs:string"/></xs:complexType>
+	<xs:complexType name="Concrete"><xs:complexContent><xs:extension base="Abstract"/></xs:complexContent></xs:complexType>
 	<xs:element name="Root">
 		<xs:complexType>
 			<xs:sequence>
@@ -1732,6 +1735,10 @@ describe('convert: XML Schema and JSON Schema agree', () => {
 				</xs:element>
 				<xs:element name="L" type="xs:int" nillable="true" minOccurs="0" maxOccurs="3"/>
 				<xs:element name="N" type="xs:int" minOccurs="0"/>
+				<xs:element name="Fixed" type="xs:int" fixed="7" nillable="true" minOccurs="0"/>
+				<xs:element name="FixedContent" type="Count" fixed="7" nillable="true" minOccurs="0"/>
+				<xs:element name="Default" type="xs:int" default="8" nillable="true" minOccurs="0"/>
+				<xs:element name="Typed" type="Abstract" nillable="true" minOccurs="0"/>
 			</xs:sequence>
 		</xs:complexType>
 	</xs:element>`),
@@ -1749,6 +1756,16 @@ describe('convert: XML Schema and JSON Schema agree', () => {
       simpleContentNoAttributes: [instance('<B xsi:nil="true"/>', xsi), true],
       repeated: [instance('<L>1</L><L xsi:nil="true"/><L>3</L>', xsi), true],
       notNillable: [instance('<N xsi:nil="true"/>', xsi), false],
+      fixedNil: [instance('<Fixed xsi:nil="true"/>', xsi), false],
+      fixedNotNil: [instance('<Fixed xsi:nil="false"/>', xsi), true],
+      fixedEmpty: [instance('<Fixed/>', xsi), true],
+      fixedWrong: [instance('<Fixed xsi:nil="false">8</Fixed>', xsi), false],
+      fixedContentNotNil: [instance('<FixedContent xsi:nil="0"/>', xsi), true],
+      fixedContentNil: [instance('<FixedContent xsi:nil="1"/>', xsi), false],
+      defaultNil: [instance('<Default xsi:nil="true"/>', xsi), true],
+      abstractNil: [instance('<Typed xsi:nil="true"/>', xsi), false],
+      abstractNilWithAttribute: [instance('<Typed xsi:nil="true" tag="x"/>', xsi), false],
+      derivedNil: [instance('<Typed xsi:nil="true" xsi:type="Concrete" tag="x"/>', xsi), true],
     });
     const value = (name: string) => verdicts.find((v) => v.name === name)?.value;
     expect(value('date')).toEqual({ D: null });
@@ -1756,10 +1773,51 @@ describe('convert: XML Schema and JSON Schema agree', () => {
     expect(value('simpleContent')).toEqual({ B: { unit: 'EUR', value: null } });
     expect(value('simpleContentNoAttributes')).toEqual({ B: null });
     expect(value('repeated')).toEqual({ L: [1, null, 3] });
+    expect(value('fixedNotNil')).toEqual({ Fixed: 7 });
+    expect(value('fixedEmpty')).toEqual({ Fixed: 7 });
+    expect(value('fixedContentNotNil')).toEqual({ FixedContent: { value: 7 } });
+    expect(value('defaultNil')).toEqual({ Default: null });
+    expect(value('derivedNil')).toEqual({ Typed: { '#type': '{urn:t}Concrete', tag: 'x', value: null } });
     expect(value('nilWithContent')).toEqual({
       error: '/Root/D: the element is nil and has content',
       code: 'nil-content',
     });
+  });
+
+  it.each([
+    { constraint: 'fixed', placement: 'root' },
+    { constraint: 'fixed', placement: 'reference' },
+    { constraint: 'default', placement: 'root' },
+    { constraint: 'default', placement: 'reference' },
+  ])('keeps a $constraint value on a $placement with derived simple content', async ({ constraint, placement }) => {
+    const root = placement === 'root';
+    const declaration = `<xs:element name="${root ? 'Root' : 'Item'}" type="Base" ${constraint}="7" nillable="true"/>`;
+    const containing = `<xs:element name="Root"><xs:complexType><xs:sequence><xs:element ref="Item"/>
+                         </xs:sequence></xs:complexType></xs:element>`;
+    const files = {
+      'value.xsd': schema(`
+        <xs:complexType name="Base"><xs:simpleContent><xs:extension base="xs:int"/></xs:simpleContent></xs:complexType>
+        <xs:complexType name="Derived"><xs:simpleContent><xs:extension base="Base">
+          <xs:attribute name="unit" type="xs:string"/>
+        </xs:extension></xs:simpleContent></xs:complexType>
+        ${declaration}
+        ${root ? '' : containing}`),
+    };
+    const doc = (text: string, nil = '') => {
+      const attrs = `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="Derived" unit="kg" ${nil}`;
+      return root ? instance(text, attrs) : instance(`<Item ${attrs}>${text}</Item>`);
+    };
+    const { verdicts } = await check(files, {
+      empty: [doc(''), true],
+      notNil: [doc('', 'xsi:nil="false"'), true],
+      same: [doc('7', 'xsi:nil="false"'), true],
+      different: [doc('8', 'xsi:nil="false"'), constraint === 'default'],
+      nil: [doc('', 'xsi:nil="true"'), constraint === 'default'],
+    });
+    const value = { '#type': '{urn:t}Derived', unit: 'kg', value: 7 };
+    const expected = root ? value : { Item: value };
+    expect(verdicts.find((v) => v.name === 'empty')?.value).toEqual(expected);
+    expect(verdicts.find((v) => v.name === 'notNil')?.value).toEqual(expected);
   });
 
   it('on wildcard content: written without a schema, and #unknown outside wildcards', async () => {

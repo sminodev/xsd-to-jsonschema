@@ -405,7 +405,8 @@ The converter translates XML Schema patterns into anchored JavaScript regular ex
 
 ## Nil
 
-An element declared with `nillable="true"` may carry `xsi:nil="true"` (or `"1"`) instead of content:
+An element declared with `nillable="true"` may carry `xsi:nil="true"` (or `"1"`) instead of content when the
+declaration has no `fixed` value.
 
 - Without attributes it is `null`, for simple and complex types alike: `<Birth xsi:nil="true"/>` becomes
   `"Birth": null`.
@@ -413,10 +414,13 @@ An element declared with `nillable="true"` may carry `xsi:nil="true"` (or `"1"`)
   `<Address kind="home" xsi:nil="true"/>` becomes `{"kind": "home", "value": null}`.
 - `xsi:nil="false"` is ordinary content. In an array, items may be `null`: `[1, null, 3]`.
 
-The property of a nillable element is an `anyOf` of its content and its nil forms, marked with
-`"xml": {"nillable": true}`; for `maxOccurs` greater than 1, `items` is that `anyOf`. The nil form `null` is left out
-when the type has required attributes, which stay required. The attributes keep the keys of the content object, so
-the attribute `value` is `@value` in both.
+The property of a nillable element is marked with `"xml": {"nillable": true}`. Its `anyOf` starts with the content
+and continues with the allowed nil forms. For `maxOccurs` greater than 1, `items` holds that `anyOf`. A declaration with
+`fixed` keeps only the content branch, and `xsi:nil="false"` still reads as ordinary content. A `default` value leaves
+the nil forms available.
+
+When the type has required attributes, a nil element must keep them in an object. The attributes keep the keys of
+the content object, so the attribute `value` is `@value` in both.
 
 ## Substitution groups and xsi:type
 
@@ -441,9 +445,15 @@ namespace is written `{}local`.
   `"xml": {"xsiType": true}`: `xsi:type` may name the declared type too, and `#type` is then written.
 - An element of a complex type with derived types is an `anyOf` of its type, unless that is abstract, and each derived
   type, which then requires `#type`. An abstract type without derived types is reported as `unsupported-element`.
+  An element's `fixed` or `default` value also applies when `xsi:type` selects a derived type with simple content.
+  Whitespace normalization can hide a distinction XML makes. For example, declare `reading` with `fixed="a  b"`
+  on a type with `xs:string` content, and define `Derived` as a restriction with `xs:whiteSpace value="collapse"`.
+  Both `<reading xsi:type="Derived"/>` and `<reading xsi:type="Derived">a b</reading>` then have the JSON text
+  value `"a b"`. XML accepts the empty element but rejects the explicit text, which differs from the declared
+  fixed value after normalization.
 - A nil element with `xsi:type` keeps `#type` next to the attributes of the type it names, inherited ones included:
-  `{"#type": "{urn:example}Dog", "chip": "123", "value": null}`. The nillable property has one nil form per type the
-  element may have; that of a derived type requires `#type`.
+  `{"#type": "{urn:example}Dog", "chip": "123", "value": null}`. The nil form for a derived type requires `#type`.
+  When the declared type is abstract, a nil element must select a concrete type and keep it in `#type`.
 - An object that has a repeated group named `type` already uses the property `#type`; that is reported as
   `duplicate-name`.
 
@@ -510,7 +520,7 @@ The [Ajv example](validation.md) registers the annotation so the validator accep
 | `group`        | Group property                | `true` for an array of repeated group occurrences.                                                                                                                         |
 | `whiteSpace`   | String values, union branches | `replace` or `collapse`: how XML normalizes the value; see [Whitespace](#whitespace).                                                                                      |
 | `list`         | Arrays                        | `true` for the items of an `xs:list`, as opposed to repeated elements; see [Lists](#lists).                                                                                |
-| `nillable`     | Element values                | `true` for a nillable element: its schema also allows the nil form; see [Nil](#nil).                                                                                       |
+| `nillable`     | Element values                | `true` when the element is declared nillable. The first `anyOf` branch holds content and the remaining branches hold any allowed nil forms. See [Nil](#nil).               |
 | `anyElement`   | Objects                       | `true` for an object with `xs:any`; see [Wildcards](#wildcards).                                                                                                           |
 | `anyAttribute` | Objects                       | `true` for an object with `xs:anyAttribute`.                                                                                                                               |
 | `xsiType`      | `#type`                       | `true` for the property that holds the type `xsi:type` selects; see [Substitution groups and xsi:type](#substitution-groups-and-xsitype).                                  |

@@ -232,7 +232,6 @@ interface Context {
 const NO_CONTEXT: Context = { plan: undefined, groupKeys: undefined, prefix: '' };
 const IDENTITY_CONSTRAINTS = ['key', 'keyref', 'unique'];
 
-const isTrue = (value: string | undefined): boolean => value === 'true' || value === '1';
 const cardinality = (max: number): Cardinality => (max === Infinity ? 'unbounded' : max);
 const escape = (key: string): string => key.replace(/~/g, '~0').replace(/\//g, '~1');
 
@@ -475,8 +474,8 @@ export class StructureBuilder {
       max: cardinality(max),
       global,
       type: '',
-      nillable: isTrue(attr(decl, 'nillable')),
-      abstract: isTrue(attr(decl, 'abstract')),
+      nillable: booleanOf(attr(decl, 'nillable')) === true,
+      abstract: booleanOf(attr(decl, 'abstract')) === true,
       source: this.source(decl),
     };
     if (key !== undefined) {
@@ -693,7 +692,7 @@ export class StructureBuilder {
       kind: 'complex',
       id,
       ...defined(naming),
-      abstract: isTrue(attr(node, 'abstract')),
+      abstract: booleanOf(attr(node, 'abstract')) === true,
       mixed: false,
       attributes: [],
       source: this.source(node),

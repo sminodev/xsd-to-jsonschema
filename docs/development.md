@@ -180,13 +180,15 @@ both representations:
 `src/test-support/xml-to-json.ts` maps the XML fixtures to JSON using the generated schema. This helper is test-only and
 is not exported. It follows the `xml` annotations: `whiteSpace`, `list`, `nillable`, `anyElement`, `anyAttribute`,
 `anyType`, `xsiType`, `type` and `decimal` tell it how to read text, lists, nil elements, wildcard content and
-`xsi:type`. For a union it takes the first `anyOf` branch that accepts the text. Where repeated groups allow several
-readings of the children, it tries them in order, within a bounded search, and keeps the first one the schema accepts.
+`xsi:type`. For a nillable declaration the first `anyOf` branch holds ordinary content and subsequent branches hold
+any nil forms the declaration allows. For a union it takes the first `anyOf` branch that accepts the text.
+Where repeated groups allow several readings of the children, it tries them in order within a bounded search and
+keeps the first one the schema accepts.
 
 It throws a `MappingError` when a document has no JSON form: `code` says why and `path` where (`/root/child`).
 `xsi-type-simple`, `name-collision` and `reading-limit` are limits of the mapping, marked with `limit`: the XML may be
-valid. `nil-content`, `not-nillable`, `invalid-nil`, `unknown-type` and `undeclared-prefix` mean the XML is invalid. The
-differential tests count each of them as a rejection.
+valid. `nil-content`, `nil-not-allowed`, `not-nillable`, `invalid-nil`, `unknown-type` and `undeclared-prefix` mean the
+XML is invalid. The differential tests count each of them as a rejection.
 
 The test validator uses the decimal `multipleOf` check in `src/decimal.ts`; see `src/test-support/oracle.ts`.
 

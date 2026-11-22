@@ -174,6 +174,7 @@ export type MappingCause =
   | 'xsi-type-simple'
   | 'name-collision'
   | 'nil-content'
+  | 'nil-not-allowed'
   | 'unknown-type'
   | 'not-nillable'
   | 'invalid-nil'
@@ -837,7 +838,13 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
       if (written !== null && !['true', 'false', '1', '0'].includes(xmlTrim(written))) {
         throw new MappingError('invalid-nil', `xsi:nil="${written}" is no boolean`, pathOf(node));
       }
-      return isTrue(written) ? nilled(node, s) : element(node, s.anyOf?.[0] ?? {}, true);
+      if (isTrue(written)) {
+        if ((s.anyOf?.length ?? 0) < 2) {
+          throw new MappingError('nil-not-allowed', 'the element has no nil form', pathOf(node));
+        }
+        return nilled(node, s);
+      }
+      return element(node, s.anyOf?.[0] ?? {}, true);
     }
     // Any xsi:nil, also "false", needs a nillable element (XML Schema Part 1, cvc-elt 3.1).
     if (written !== null && !nillable) {
@@ -946,7 +953,9 @@ export function xmlToJson(schema: JsonSchema, text: string, options: XmlToJsonOp
     const empty =
       !target.xml?.anyElement && entries.every(([, p]) => p.xml?.attribute === true || p.xml?.xsiType === true);
     if (textProp) {
-      put(out, textProp[0], valueConstraint(node, textProp[1])?.value ?? value(text, textProp[1]));
+      const declaration = s.properties?.[textProp[0]];
+      const constraint = typeof declaration === 'object' ? declaration : textProp[1];
+      put(out, textProp[0], valueConstraint(node, constraint)?.value ?? value(text, textProp[1]));
     } else if (xmlTrim(text) !== '' || (empty && text !== '')) {
       put(out, '#unknown:text', xmlTrim(text) === '' ? text : xmlTrim(text));
     }

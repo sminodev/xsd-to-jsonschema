@@ -417,7 +417,7 @@ export class Emitter {
     if (named) {
       this.checkElement(decl);
     }
-    if (isTrue(attr(root.node, 'abstract'))) {
+    if (booleanOf(attr(root.node, 'abstract')) === true) {
       this.problems.error(
         'unsupported-element',
         `${name} is abstract; a document uses an element of its substitution group as root, choose that one`,
@@ -671,7 +671,7 @@ export class Emitter {
    * when types derive from it, so its entries are kept apart; if none do, they only stay out of the early stop.
    */
   private rootTypeAlternatives(decl: ElementDeclaration, type: QName, named: Component, root: Component): JsonSchema {
-    const abstract = isTrue(attr(named.node, 'abstract'));
+    const abstract = booleanOf(attr(named.node, 'abstract')) === true;
     const mark = abstract ? this.leaveOut() : 0;
     let own: JsonSchema | undefined;
     try {
@@ -697,7 +697,7 @@ export class Emitter {
     const id = clark(type.ns, type.local);
     const complex = this.set.lookup('complexType', type);
     if (complex) {
-      const abstract = isTrue(attr(complex.node, 'abstract'));
+      const abstract = booleanOf(attr(complex.node, 'abstract')) === true;
       const others = alternatives.filter((alternative) => alternative.id !== id);
       if (others.length === 0) {
         if (abstract) {
@@ -712,7 +712,8 @@ export class Emitter {
       // Each use of a type lists the types derived from it: counted before they are made.
       const count = others.length + (abstract ? 0 : 1);
       this.reserve(count);
-      const branches = others.map((alternative) => this.typeBranch(alternative, decl.node));
+      const constrained = attr(decl.node, 'fixed') !== undefined || attr(decl.node, 'default') !== undefined;
+      const branches = others.map((alternative) => this.typeBranch(alternative, decl.node, constrained));
       // An abstract type has no object of its own; the one made for it is left out.
       if (abstract) {
         this.discarded(schema);
@@ -743,8 +744,10 @@ export class Emitter {
   }
 
   /** The schema of an element whose xsi:type selects the derived complex type `alternative`. */
-  private typeBranch(alternative: TypeAlternative, at: Element): JsonSchema {
-    return { ...this.typeRef(alternative.name, at), type: 'object', required: ['#type'] };
+  private typeBranch(alternative: TypeAlternative, at: Element, constrained: boolean): JsonSchema {
+    const schema: JsonSchema = { ...this.typeRef(alternative.name, at), type: 'object', required: ['#type'] };
+    const selected = constrained ? this.set.lookup('complexType', alternative.name) : undefined;
+    return selected ? this.withValues(schema, at, undefined, this.textType(selected.node)) : schema;
   }
 
   /** The `#type` property for these expanded type names. */
@@ -875,23 +878,41 @@ export class Emitter {
    * The schema of a nillable element: its content, or its nil form, marked with `xml.nillable`. The nil form is
    * `null` when the element can do without attributes, and an object with the attributes and the text property
    * `null` when it has attributes. With `xsi:type`, the nil form of each type the element may have carries `#type`
-   * and the attributes of that type, inherited ones included.
+   * and the attributes of that type, inherited ones included. A fixed value forbids nil but still allows
+   * `xsi:nil="false"`, so only the content branch remains.
    */
   private nillable(decl: ElementDeclaration, schema: JsonSchema): JsonSchema {
-    if (!isTrue(attr(decl.node, 'nillable'))) {
+    if (booleanOf(attr(decl.node, 'nillable')) !== true) {
       return schema;
     }
+    const forms = attr(decl.node, 'fixed') === undefined ? this.nilForms(decl) : [];
+    if (forms.length === 0 && !this.options.xml) {
+      return schema;
+    }
+    const out: JsonSchema = {};
+    if (schema.description) {
+      out.description = schema.description;
+    }
+    out.anyOf = [without(schema, 'description'), ...forms];
+    if (this.options.xml) {
+      out.xml = { nillable: true };
+    }
+    return out;
+  }
+
+  private nilForms(decl: ElementDeclaration): JsonSchema[] {
     const forms: JsonSchema[] = [];
     const { attributes, anyAttribute } = this.declaredAttributes(decl);
     const type = this.poly.typeName(decl.node);
     const declared = type && this.set.lookup('complexType', type);
     const alternatives = (declared && type && this.typeChoices(decl, type)) || [];
     const declaredId = type && clark(type.ns, type.local);
-    if (!attributes.some((a) => a.required)) {
+    const abstract = declared !== undefined && booleanOf(attr(declared.node, 'abstract')) === true;
+    if (!abstract && !attributes.some((a) => a.required)) {
       forms.push({ type: 'null' });
     }
     const plan = this.keyPlan(decl);
-    if (alternatives.length === 0) {
+    if (!abstract && alternatives.length === 0) {
       const form = this.nilForm(decl, attributes, anyAttribute, plan);
       if (form && (attributes.length > 0 || anyAttribute)) {
         this.made(form);
@@ -910,15 +931,7 @@ export class Emitter {
         forms.push(form);
       }
     }
-    const out: JsonSchema = {};
-    if (schema.description) {
-      out.description = schema.description;
-    }
-    out.anyOf = [without(schema, 'description'), ...forms];
-    if (this.options.xml) {
-      out.xml = { nillable: true };
-    }
-    return out;
+    return forms;
   }
 
   /**
@@ -1462,8 +1475,6 @@ export class Emitter {
     return schema;
   }
 }
-
-const isTrue = (value: string | undefined): boolean => value === 'true' || value === '1';
 
 /** How many anonymous complex types of local elements are written in place, one inside the other. */
 const MAX_INLINE_DEPTH = 64;
