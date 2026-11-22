@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { checkElapsed } from './test-support/performance.js';
+import { convert } from './convert.js';
 import { convertFile } from './node.js';
 import { checkDoctype } from './doctype.js';
 import { ajvFor } from './test-support/oracle.js';
@@ -56,6 +57,19 @@ describe('DOCTYPE declarations in schema documents', () => {
     const { schema, problems } = convertFile(join(CASES, file));
     expect(schema).toBeUndefined();
     expect(problems.map((p) => p.code)).toEqual(['invalid-xml']);
+  });
+
+  it('blocks conversion when an imported schema has a second byte order mark', () => {
+    const files = {
+      'entry.xsd': `<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+        <xs:import namespace="urn:test:ds" schemaLocation="imported.xsd"/>
+        <xs:element name="r" type="xs:string"/>
+      </xs:schema>`,
+      'imported.xsd': readFileSync(join(CASES, 'malformed-double-bom.xsd'), 'utf8'),
+    };
+    const { schema, problems } = convert({ files, entry: 'entry.xsd' });
+    expect(schema).toBeUndefined();
+    expect(problems).toMatchObject([{ code: 'invalid-xml', file: 'imported.xsd' }]);
   });
 
   it('cover every case', () => {

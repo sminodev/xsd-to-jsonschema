@@ -349,6 +349,7 @@ export class SchemaSet {
     }
     const doctype = checkDoctype(text);
     if (doctype.kind === 'invalid') {
+      this.blocked = true;
       this.problems.error('invalid-xml', `${path}: ${doctype.reason}`, { file: path });
       return undefined;
     }
