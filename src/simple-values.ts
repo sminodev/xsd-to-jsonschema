@@ -3,6 +3,29 @@ import type { JsonSchema, JsonType } from './json-schema.js';
 import { numericViolation } from './numeric-facets.js';
 import type { At, Problems } from './problems.js';
 
+const LENGTH_BUILTINS = new Set([
+  'string',
+  'normalizedString',
+  'token',
+  'language',
+  'Name',
+  'NCName',
+  'NMTOKEN',
+  'ID',
+  'IDREF',
+  'ENTITY',
+  'anyURI',
+  'QName',
+  'NOTATION',
+  'hexBinary',
+  'base64Binary',
+]);
+
+/** Whether a length facet applies to an atomic XML Schema type. */
+export function supportsAtomicLength(builtin: string): boolean {
+  return LENGTH_BUILTINS.has(builtin);
+}
+
 /** A lexical value as JSON; `rounded` says that a JSON number cannot hold it exactly. */
 export function lexicalToJson(
   types: JsonType | JsonType[] | undefined,
@@ -88,8 +111,17 @@ export function violation(schema: JsonSchema, value: unknown): string | undefine
   if (schema.enum && !schema.enum.includes(value)) {
     return 'not in the base enumeration';
   }
+  if ('const' in schema && schema.const !== value) {
+    return 'not the required value';
+  }
+  if (schema.not && violation(schema.not, value) === undefined) {
+    return 'excluded by the base type';
+  }
   if (schema.anyOf && !schema.anyOf.some((member) => violation(member, value) === undefined)) {
     return 'does not satisfy any allowed alternative';
+  }
+  if (schema.allOf?.some((constraint) => violation(constraint, value) !== undefined)) {
+    return 'does not satisfy all required constraints';
   }
   if (typeof value === 'string') {
     const length = [...value].length;

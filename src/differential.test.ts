@@ -1313,8 +1313,7 @@ describe('convert: XML Schema and JSON Schema agree', () => {
     await check(files, {
       days: [instance('<D>P1D</D>'), true],
       all: [instance('<D>-P1Y2M3DT4H5M6.7S</D>'), true],
-      shortSeconds: [instance('<D>PT.5S</D>'), true],
-      openSeconds: [instance('<D>PT1.S</D>'), true],
+      fractionalSeconds: [instance('<D>PT0.5S</D>'), true],
       nothing: [instance('<D>P</D>'), false],
       negativeNothing: [instance('<D>-P</D>'), false],
       emptyTime: [instance('<D>P1YT</D>'), false],
@@ -1323,6 +1322,19 @@ describe('convert: XML Schema and JSON Schema agree', () => {
       oneOctet: [instance('<Hash>0a</Hash>'), false],
       threeOctets: [instance('<Hash>0a0b0c</Hash>'), false],
     });
+    // XML Schema 1.0, 3.2.6.1 requires a digit on each side of the decimal point. libxml2 accepts both spellings.
+    const { verdicts } = await compare({
+      files,
+      entry: 'lexical.xsd',
+      instances: {
+        missingWholeSeconds: instance('<D>PT.5S</D>'),
+        missingFractionalSeconds: instance('<D>PT1.S</D>'),
+      },
+    });
+    expect(verdicts).toMatchObject([
+      { xsd: true, json: false },
+      { xsd: true, json: false },
+    ]);
   });
 
   it('on unions whose members normalize whitespace differently: each member on its own, in member order', async () => {

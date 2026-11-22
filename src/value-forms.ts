@@ -20,6 +20,8 @@ const INTEGER_TYPES = [
   'unsignedByte',
   'positiveInteger',
 ];
+const STRING_TYPES = ['normalizedString', 'token', 'language', 'Name', 'NCName', 'ID', 'IDREF', 'ENTITY', 'NMTOKEN'];
+const FINITE_NUMBER = /^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/;
 
 /** Escapes text for an ECMAScript pattern with the `u` flag, which allows escapes of syntax characters only. */
 export function escapePattern(text: string): string {
@@ -60,6 +62,21 @@ export function equalForms(builtin: string, text: string): string | undefined {
     return numberForms(text, INTEGER_TYPES.includes(builtin));
   }
   return undefined;
+}
+
+/** The primitive type and the value it assigns to a normalized enumeration literal. */
+export function valueKey(builtin: string, text: string): string {
+  if ((builtin === 'float' || builtin === 'double') && FINITE_NUMBER.test(text)) {
+    const value = Number(text);
+    const number = builtin === 'float' ? Math.fround(value) : value;
+    return `${builtin}:${number === Infinity ? 'INF' : number === -Infinity ? '-INF' : String(number)}`;
+  }
+  const primitive = primitiveType(builtin);
+  return `${primitive}:${equalForms(primitive, text) ?? escapePattern(text)}`;
+}
+
+export function primitiveType(builtin: string): string {
+  return INTEGER_TYPES.includes(builtin) ? 'decimal' : STRING_TYPES.includes(builtin) ? 'string' : builtin;
 }
 
 function timeForms(builtin: string, text: string): string | undefined {
@@ -113,7 +130,7 @@ export const FLOAT_INFINITE = 2 ** 128 - 2 ** 103;
  * Schema Part 2, 3.2.4), which JSON writes as a string. Undefined for any other text.
  */
 export function floatOverflow(text: string): 'INF' | '-INF' | undefined {
-  if (!/^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(text)) {
+  if (!FINITE_NUMBER.test(text)) {
     return undefined;
   }
   const float = Math.fround(Number(text));

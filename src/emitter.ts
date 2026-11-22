@@ -34,13 +34,7 @@ import {
   xsChild,
   xsChildren,
 } from './schema-set.js';
-import {
-  floatTuple,
-  type RestrictionStep,
-  type SimpleTypeOptions,
-  type SimpleTypeRef,
-  SimpleTypes,
-} from './simple-types.js';
+import { type RestrictionStep, type SimpleTypeOptions, type SimpleTypeRef, SimpleTypes } from './simple-types.js';
 import { xmlTrim } from './simple-values.js';
 
 const SCHEMA_2020_12 = 'https://json-schema.org/draft/2020-12/schema';
@@ -125,6 +119,7 @@ export class Emitter {
       options,
       (local, build) => this.definitions.ref('type', clark(XS, local), local, build),
       (name, from) => this.typeRef(name, from),
+      (count) => this.ensure(count),
     );
     this.poly = new Polymorphism(set);
     this.contentModel = new ContentModel(
@@ -835,9 +830,11 @@ export class Emitter {
       delete values.const;
       return;
     }
-    // A list of xs:float compares item by item in the same way.
-    if (Array.isArray(values.const) && this.simple.isFloatList(type, node)) {
-      values.allOf = [floatTuple(values.const)];
+    const tuple = Array.isArray(values.const)
+      ? this.simple.fixedListForms(type, lexical, values.const, node)
+      : undefined;
+    if (tuple !== undefined) {
+      values.allOf = [tuple];
       values.default = values.const;
       delete values.const;
       return;

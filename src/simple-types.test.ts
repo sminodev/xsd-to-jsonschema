@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { convert } from './index.js';
 import type { JsonSchema } from './json-schema.js';
 import { Problems } from './problems.js';
 import { SchemaSet } from './schema-set.js';
 import { lexicalToJson, SimpleTypes, type SimpleTypeOptions } from './simple-types.js';
+import { ajvFor } from './test-support/oracle.js';
 
 const XS = 'http://www.w3.org/2001/XMLSchema';
 
@@ -37,6 +39,21 @@ function types(body: string, options: SimpleTypeOptions = { dateTime: 'format' }
 
 const restriction = (name: string, base: string, facets: string) =>
   `<xs:simpleType name="${name}"><xs:restriction base="${base}">${facets}</xs:restriction></xs:simpleType>`;
+
+const enumeration = (value: string) => `<xs:enumeration value="${value}"/>`;
+const pattern = (value: string) => `<xs:pattern value="${value}"/>`;
+const union = (name: string, members: string) =>
+  `<xs:simpleType name="${name}"><xs:union memberTypes="${members}"/></xs:simpleType>`;
+
+function expectValues(schema: JsonSchema, accepted: unknown[], rejected: unknown[]): void {
+  const validate = ajvFor(schema);
+  for (const value of accepted) {
+    expect(validate(value), JSON.stringify(value)).toBe(true);
+  }
+  for (const value of rejected) {
+    expect(validate(value), JSON.stringify(value)).toBe(false);
+  }
+}
 
 describe('SimpleTypes', () => {
   it('maps built-in types', () => {
@@ -251,6 +268,210 @@ describe('SimpleTypes', () => {
     });
     expect(t.schema('Tokens')).toMatchObject({ type: 'array', minItems: 1, maxItems: 3 });
     expect(t.codes()).toEqual(['unsupported-length']);
+  });
+
+  it.each([
+    { base: 'xs:hexBinary', named: '0a', lexical: '[0-9A-F]{2}', valid: '0A', invalid: '0B' },
+    {
+      base: 'xs:dateTime',
+      named: '2002-01-01T12:00:00Z',
+      lexical: '.*\\+00:00',
+      valid: '2002-01-01T12:00:00+00:00',
+      invalid: '2002-01-01T12:00:01+00:00',
+    },
+    { base: 'Mixed', named: '042', lexical: '42', valid: '42', invalid: '43' },
+  ])(
+    'matches the instance pattern independently of the $base enumeration spelling',
+    ({ base, named, lexical, valid, invalid }) => {
+      const t = types(
+        union('Mixed', 'xs:integer xs:string') +
+          restriction('Together', base, enumeration(named) + pattern(lexical)) +
+          restriction('Base', base, enumeration(named)) +
+          restriction('Later', 'Base', pattern(lexical)),
+        { dateTime: 'pattern' },
+      );
+      for (const type of ['Together', 'Later']) {
+        expectValues(t.schema(type), [valid], [named, invalid]);
+      }
+      expect(t.codes()).toEqual([]);
+    },
+  );
+
+  it.each([
+    { base: 'xs:hexBinary', named: '0a', spelling: '0A', invalid: '0B', valid: ['0A', '0a'] },
+    {
+      base: 'xs:date',
+      named: '2002-01-01Z',
+      spelling: '2002-01-01+00:00',
+      invalid: '2002-01-02+00:00',
+      valid: ['2002-01-01Z', '2002-01-01-00:00'],
+    },
+    {
+      base: 'xs:time',
+      named: '12:00:00.10Z',
+      spelling: '12:00:00.100+00:00',
+      invalid: '12:00:00.12+00:00',
+      valid: ['12:00:00.1Z', '12:00:00.100-00:00'],
+    },
+    {
+      base: 'xs:float',
+      named: '0.1',
+      spelling: '0.10000000149011612',
+      invalid: '0.10001',
+      valid: [0.1, 0.10000000149011612],
+    },
+    { base: 'xs:float', named: 'INF', spelling: '1e39', invalid: '-1e39', valid: ['INF', 1e39] },
+  ])(
+    'recognizes the same $base value when a derived enumeration uses $spelling',
+    ({ base, named, spelling, valid, invalid }) => {
+      const t = types(
+        restriction('Base', base, enumeration(named)) +
+          restriction('Derived', 'Base', enumeration(spelling)) +
+          restriction('Different', 'Base', enumeration(invalid)),
+        { dateTime: 'pattern' },
+      );
+      expectValues(t.schema('Derived'), valid, [base === 'xs:float' ? Number(invalid) : invalid]);
+      expect(t.codes()).toEqual([]);
+      expectValues(t.schema('Different'), [], valid);
+      expect(t.codes()).toEqual(['invalid-facet']);
+    },
+  );
+
+  it('uses the first accepting union member to compare a derived enumeration with its base', () => {
+    const t = types(
+      union('BooleanFirst', 'xs:boolean xs:token') +
+        restriction('BooleanBase', 'BooleanFirst', enumeration('true')) +
+        restriction('BooleanDerived', 'BooleanBase', enumeration('1')) +
+        union('TokenFirst', 'xs:token xs:boolean') +
+        restriction('TokenBase', 'TokenFirst', enumeration('true')) +
+        restriction('TokenDerived', 'TokenBase', enumeration('1')),
+    );
+    expectValues(t.schema('BooleanDerived'), ['1', 'true'], ['0', 'TRUE']);
+    expect(t.codes()).toEqual([]);
+    expectValues(t.schema('TokenDerived'), [], ['1', 'true']);
+    expect(t.codes()).toEqual(['invalid-facet']);
+  });
+
+  it('keeps a spelling only if its first accepting union member assigns the enumerated value', () => {
+    const t = types(
+      restriction('Padded', 'xs:integer', pattern('0[0-9]+')) +
+        union('PaddedOrString', 'Padded xs:string') +
+        union('PaddedOrIntegerOrString', 'Padded xs:integer xs:string') +
+        union('StringFirst', 'xs:string xs:integer') +
+        union('IntegerFirst', 'xs:integer xs:boolean') +
+        restriction('PaddedValue', 'PaddedOrString', enumeration('042')) +
+        restriction('IntegerValue', 'PaddedOrIntegerOrString', enumeration('042') + pattern('42')) +
+        restriction('StringValue', 'StringFirst', enumeration('042')) +
+        restriction('Flag', 'IntegerFirst', enumeration('true')),
+    );
+    expectValues(t.schema('PaddedValue'), ['042', '0042'], ['42', '43']);
+    expectValues(t.schema('IntegerValue'), ['42'], ['042', '43']);
+    expectValues(t.schema('StringValue'), ['042'], ['42', '0042']);
+    expectValues(t.schema('Flag'), ['true'], ['1', '0', 'false']);
+  });
+
+  it('uses float32 equality in a numeric union only for values selected as floats', () => {
+    const t = types(
+      union('FloatFirst', 'xs:float xs:integer') +
+        union('IntegerFirst', 'xs:integer xs:float') +
+        union('DecimalFirst', 'xs:decimal xs:float') +
+        restriction('UnitFloat', 'xs:float', '<xs:maxInclusive value="1"/>') +
+        union('SmallFloatFirst', 'UnitFloat xs:integer') +
+        restriction('Fraction', 'FloatFirst', enumeration('0.1')) +
+        restriction('Decimal', 'DecimalFirst', enumeration('0.1')) +
+        restriction('Float', 'FloatFirst', enumeration('16777217')) +
+        restriction('Integer', 'IntegerFirst', enumeration('16777217')) +
+        restriction('OutsideFloat', 'SmallFloatFirst', enumeration('16777217')) +
+        restriction('Overflow', 'FloatFirst', enumeration('1e39')),
+    );
+    expectValues(t.schema('Fraction'), [0.1, 0.10000000149011612], [0.10001, 0, '0.1']);
+    expectValues(t.schema('Decimal'), [0.1], [0.10000000149011612, 0.10001]);
+    expectValues(t.schema('Float'), [16777216, 16777217], [16777218]);
+    expectValues(t.schema('Integer'), [16777217], [16777216, 16777218]);
+    expectValues(t.schema('OutsideFloat'), [16777217], [16777216, 16777218]);
+    expectValues(t.schema('Overflow'), ['INF', 1e39], [-1e39, 1e30]);
+    expect(t.codes()).toEqual([]);
+  });
+
+  it.each([
+    { item: 'xs:hexBinary', named: '0a ff', spelling: '0A FF', valid: ['0A', 'fF'], invalid: ['0a', 'fe'] },
+    {
+      item: 'xs:date',
+      named: '2002-01-01Z 2002-01-02Z',
+      spelling: '2002-01-01+00:00 2002-01-02-00:00',
+      valid: ['2002-01-01-00:00', '2002-01-02Z'],
+      invalid: ['2002-01-01Z', '2002-01-03Z'],
+    },
+  ])('compares enumerated and fixed lists of $item by item value', ({ item, named, spelling, valid, invalid }) => {
+    const declarations =
+      `<xs:simpleType name="List"><xs:list itemType="${item}"/></xs:simpleType>` +
+      restriction('Base', 'List', enumeration(named)) +
+      restriction('Derived', 'Base', enumeration(spelling));
+    const t = types(declarations, { dateTime: 'pattern' });
+    for (const type of ['Base', 'Derived']) {
+      expectValues(t.schema(type), [valid], [invalid, [valid[0]], [...valid].reverse()]);
+    }
+    expect(t.codes()).toEqual([]);
+    const { schema, problems } = convert({
+      files: {
+        't.xsd': `<xs:schema xmlns:xs="${XS}">${declarations}
+          <xs:element name="Root" type="List" fixed="${named}"/>
+        </xs:schema>`,
+      },
+      entry: 't.xsd',
+    });
+    expect(problems).toEqual([]);
+    expect(schema).toBeDefined();
+    expectValues(schema ?? {}, [valid], [invalid, [...valid].reverse()]);
+  });
+
+  it('checks each item pattern in a list with one enumerated value', () => {
+    const t = types(
+      restriction('UpperHex', 'xs:hexBinary', pattern('[0-9A-F]+') + '<xs:length value="1"/>') +
+        '<xs:simpleType name="List"><xs:list itemType="UpperHex"/></xs:simpleType>' +
+        restriction('OnlyOne', 'List', enumeration('0A')),
+    );
+    expectValues(t.schema('OnlyOne'), [['0A']], [['0a'], ['0B'], ['0A0A'], ['0A', '0A']]);
+    expect(t.codes()).toEqual([]);
+  });
+
+  it('reports that numbers and booleans lose their lexical pattern even with an enumeration', () => {
+    const t = types(
+      union('Numeric', 'xs:integer xs:decimal') +
+        restriction('Count', 'xs:integer', pattern('0[0-9]') + enumeration('05')) +
+        restriction('Flag', 'xs:boolean', pattern('1') + enumeration('true')) +
+        restriction('Amount', 'Numeric', pattern('0[0-9]') + enumeration('05')),
+    );
+    expectValues(t.schema('Count'), [5], [4, '05']);
+    expectValues(t.schema('Flag'), [true], [false, '1']);
+    expectValues(t.schema('Amount'), [5], [4, '05']);
+    expect(t.codes()).toEqual(['lexical-pattern', 'lexical-pattern', 'lexical-pattern']);
+  });
+
+  it.each(['xs:integer', 'xs:decimal', 'xs:boolean', 'xs:date', 'xs:time', 'xs:duration'])(
+    'reports length facets on %s and omits them',
+    (base) => {
+      const t = types(
+        restriction('Bound', base, '<xs:length value="2"/><xs:minLength value="1"/><xs:maxLength value="3"/>'),
+      );
+      const out = t.schema('Bound');
+      expect(out).not.toHaveProperty('minLength');
+      expect(out).not.toHaveProperty('maxLength');
+      expect(() => ajvFor(out)).not.toThrow();
+      expect(t.codes()).toEqual(['invalid-facet', 'invalid-facet', 'invalid-facet']);
+    },
+  );
+
+  it('reports fractionDigits precision loss when a bound is printed in exponential notation', () => {
+    const t = types(
+      restriction(
+        'Amount',
+        'xs:decimal',
+        '<xs:minInclusive value="0"/><xs:maxInclusive value="1000000000000000000000"/><xs:fractionDigits value="2"/>',
+      ),
+    );
+    expect(t.schema('Amount')).toMatchObject({ minimum: 0, maximum: 1e21, multipleOf: 0.01 });
+    expect(t.codes()).toEqual(['rounded-number', 'rounded-number']);
   });
 });
 

@@ -1049,8 +1049,10 @@ describe('convert', () => {
       );
       expect(problems).toMatchObject([
         { code: 'unsupported-bound', message: expect.stringContaining('minInclusive') as string },
+        { code: 'invalid-facet', message: 'maxLength does not apply to xs:dateTime' },
       ]);
-      expect(out?.properties?.['value']).toMatchObject({ type: 'string', maxLength: 30, xml: { text: true } });
+      expect(out?.properties?.['value']).toMatchObject({ type: 'string', xml: { text: true } });
+      expect(out?.properties?.['value']).not.toHaveProperty('maxLength');
     });
   });
 

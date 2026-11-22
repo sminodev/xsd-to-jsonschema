@@ -3,7 +3,7 @@ import type { JsonSchema, JsonType } from './json-schema.js';
 import { applyNumericFacets, type NumericFacets } from './numeric-facets.js';
 import { type At, Problems } from './problems.js';
 import { attr, type QName, type SchemaSet, XS, xsChild, xsChildren } from './schema-set.js';
-import { enumSchema, lexicalToJson, primaryType, violation, xmlTrim } from './simple-values.js';
+import { enumSchema, lexicalToJson, primaryType, supportsAtomicLength, violation, xmlTrim } from './simple-values.js';
 import {
   equalForms,
   escapePattern,
@@ -13,6 +13,8 @@ import {
   floatOverflow,
   floatValueSchema,
   hasUnlistedForms,
+  primitiveType,
+  valueKey,
 } from './value-forms.js';
 import { combinePatterns, translateBody, XsdRegexError } from './xsd-regex.js';
 
@@ -33,8 +35,8 @@ const MONTH_DAY =
   '((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))';
 const DATE = `(${YEAR}-${MONTH_DAY}|${LEAP_YEAR}-02-29)`;
 const TIME = '(([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?|(24:00:00(\\.0+)?))';
-// A duration has at least one part; seconds may be written as `1.5`, `1.` or `.5`.
-const SECONDS = '([0-9]+(\\.[0-9]*)?|\\.[0-9]+)S';
+// XML Schema 1.0, 3.2.6.1 requires digits on both sides of a decimal point in duration seconds.
+const SECONDS = '[0-9]+(\\.[0-9]+)?S';
 const DURATION_TIME = `T([0-9]+H([0-9]+M)?(${SECONDS})?|[0-9]+M(${SECONDS})?|${SECONDS})`;
 const DURATION =
   `-?P([0-9]+Y([0-9]+M)?([0-9]+D)?(${DURATION_TIME})?|[0-9]+M([0-9]+D)?(${DURATION_TIME})?` +
@@ -312,6 +314,8 @@ interface Derivation {
 }
 
 type SchemaRequest = [type: SimpleTypeRef, from: Element | undefined];
+type AtomicValue = { builtin: string; text: string };
+type ListValue = { lexical: string; items: unknown[] };
 
 /** Bounds the work of flattening intermediate unions along one chain of simple types. */
 const MAX_SIMPLE_DEPTH = 1000;
@@ -361,6 +365,7 @@ export class SimpleTypes {
    * @param nameRef - a `$ref` to one definition of a built-in name type (`Name`, `NCName`, `QName` and those derived
    * from them, `NMTOKEN`), built by `build` the first time; their patterns are long, so they are written once
    * @param memberRef - a `$ref` to the definition of a named simple type, for the members of a union
+   * @param ensureEntries - checks the output budget before expanding the ordered alternatives of an enumeration
    */
   constructor(
     private readonly set: SchemaSet,
@@ -368,6 +373,7 @@ export class SimpleTypes {
     private readonly options: SimpleTypeOptions,
     private readonly nameRef?: (local: string, build: () => JsonSchema) => JsonSchema,
     private readonly memberRef?: (name: QName, from: Element) => JsonSchema,
+    private readonly ensureEntries?: (count: number) => void,
   ) {}
 
   /** The same types with patterns in place and for dates and times, to check values against members and items. */
@@ -375,7 +381,14 @@ export class SimpleTypes {
     if (this.options.dateTime === 'pattern' && this.nameRef === undefined) {
       return this;
     }
-    return (this.patternTypes ??= new SimpleTypes(this.set, new Problems(), { ...this.options, dateTime: 'pattern' }));
+    return (this.patternTypes ??= new SimpleTypes(
+      this.set,
+      new Problems(),
+      { ...this.options, dateTime: 'pattern' },
+      undefined,
+      undefined,
+      this.ensureEntries,
+    ));
   }
 
   private at(node: Element | undefined): At | undefined {
@@ -623,7 +636,7 @@ export class SimpleTypes {
       ? yield* this.listSchema(derivation, derivation.list)
       : derivation.union
         ? yield* this.unionSchema(derivation, derivation.union, at)
-        : this.facetSchema(type, from, derivation, at);
+        : this.facetSchema(derivation, at);
     const schema = this.withDecimal(this.withWhiteSpace(facets, type, from), type, from);
     if (key === undefined) {
       return schema;
@@ -650,18 +663,14 @@ export class SimpleTypes {
   }
 
   /** The schema of a simple type without its `xml` annotation. */
-  private facetSchema(
-    type: SimpleTypeRef,
-    from: Element | undefined,
-    derivation: Derivation,
-    at: At | undefined,
-  ): JsonSchema {
+  private facetSchema(derivation: Derivation, at: At | undefined): JsonSchema {
     if (derivation.missing) {
       const { name, from: namedAt } = derivation.missing;
       this.problems.error('unknown-type', `simple type {${name.ns}}${name.local} is not defined`, this.at(namedAt));
       return {};
     }
     const schema = this.builtinSchema(derivation.builtin);
+    const builtinPattern = schema.pattern;
     const json = schema.type;
     if (derivation.builtin === 'QName') {
       this.problems.warning(
@@ -716,6 +725,14 @@ export class SimpleTypes {
           case 'length':
           case 'minLength':
           case 'maxLength': {
+            if (!supportsAtomicLength(derivation.builtin)) {
+              this.problems.error(
+                'invalid-facet',
+                `${facet.localName} does not apply to xs:${derivation.builtin}`,
+                facetAt,
+              );
+              break;
+            }
             // The length of binary data counts octets.
             if (derivation.builtin === 'base64Binary') {
               this.problems.warning(
@@ -827,7 +844,12 @@ export class SimpleTypes {
         patternSteps.push(patterns);
       }
       if (values.length > 0) {
-        enumeration = this.withinBase(values, enumeration, json, step.node);
+        enumeration = this.withinBase(
+          values,
+          enumeration,
+          (value) => valueKey(derivation.builtin, json === 'string' ? value : xmlTrim(value)),
+          step.node,
+        );
         enumAt = step.node;
       }
     }
@@ -858,7 +880,7 @@ export class SimpleTypes {
     if (patternSteps.length > 0) {
       if (json === 'string') {
         schema.pattern = combinePatterns(patternSteps);
-      } else if (enumeration === undefined) {
+      } else {
         delete schema.pattern;
         this.problems.warning(
           'lexical-pattern',
@@ -872,8 +894,16 @@ export class SimpleTypes {
       return this.floatingSchema(schema, specials, enumeration, enumAt, derivation.builtin === 'float');
     }
     if (enumeration !== undefined && enumAt !== undefined) {
-      const out = enumSchema(schema, enumeration, this.problems, this.at(enumAt));
-      return json === 'string' ? this.byValue(out, (lexical) => this.valueOf(type, lexical, from)).schema : out;
+      if (json === 'string') {
+        return this.stringEnumeration(
+          schema,
+          enumeration,
+          this.at(enumAt),
+          (lexical) => ({ builtin: derivation.builtin, text: lexical }),
+          builtinPattern,
+        ).schema;
+      }
+      return enumSchema(schema, enumeration, this.problems, this.at(enumAt));
     }
     return schema;
   }
@@ -938,33 +968,47 @@ export class SimpleTypes {
   }
 
   /**
-   * An enumeration of string values compared by value: a pattern with all spellings of the values, where a value has
-   * more than one. Unchanged where each value has one spelling, or where the spellings can't be listed (a float or
-   * double member of a union); `unlisted` then names the type.
+   * An enumeration compares values, while the instance must match the type's patterns in its own spelling.
+   * When a value has several spellings, keep the lexical constraint alongside the pattern of its spellings.
    */
-  private byValue(
+  private stringEnumeration(
     schema: JsonSchema,
-    valueOf: (lexical: string) => { builtin: string; text: string },
+    values: string[],
+    at: At | undefined,
+    valueOf: (lexical: string) => AtomicValue,
+    builtinPattern?: string,
   ): { schema: JsonSchema; unlisted?: string } {
-    if (!schema.enum) {
-      return { schema };
-    }
-    const forms = this.valueForms(schema.enum.map(String), valueOf);
+    const forms = this.valueForms(values, valueOf);
     if ('unlisted' in forms) {
-      return { schema, unlisted: forms.unlisted };
+      return { schema: enumSchema(schema, values, this.problems, at), unlisted: forms.unlisted };
     }
     if (forms.pattern === undefined) {
-      return { schema };
+      return { schema: enumSchema(schema, values, this.problems, at) };
     }
-    const out: JsonSchema = { ...schema, pattern: forms.pattern };
-    delete out.enum;
+    const base = { ...schema };
+    delete base.pattern;
+    if (builtinPattern !== undefined) {
+      base.pattern = builtinPattern;
+    }
+    const out = enumSchema(base, values, this.problems, at);
+    if (out.enum === undefined) {
+      return { schema: out };
+    }
+    const allowed = this.valueForms(out.enum.map(String), valueOf);
+    const lexicalPattern = schema.pattern === builtinPattern ? undefined : schema.pattern;
+    if ('pattern' in allowed && allowed.pattern !== undefined) {
+      out.pattern = lexicalPattern === undefined ? allowed.pattern : `(?=${lexicalPattern})${allowed.pattern}`;
+      delete out.enum;
+    } else if (schema.pattern !== undefined) {
+      out.pattern = schema.pattern;
+    }
     return { schema: out };
   }
 
-  /** The pattern of all spellings of these values, see `byValue`; undefined if each value has one spelling. */
+  /** The pattern of the spellings of these values, or undefined if each value has just one spelling. */
   private valueForms(
     lexicals: string[],
-    valueOf: (lexical: string) => { builtin: string; text: string },
+    valueOf: (lexical: string) => AtomicValue,
   ): { pattern?: string } | { unlisted: string } {
     let needed = false;
     const forms: string[] = [];
@@ -986,15 +1030,9 @@ export class SimpleTypes {
     return derivation.variety === 'atomic' && derivation.builtin === 'float';
   }
 
-  /** Whether a simple type is a list of xs:float, or of a type derived from it by restriction. */
-  isFloatList(type: SimpleTypeRef, from?: Element): boolean {
-    const derivation = this.derive(type, from);
-    return derivation.list !== undefined && this.isFloat(derivation.list.item, derivation.list.node);
-  }
-
   /**
-   * The pattern for a fixed value of a type whose JSON value is a string, compared by value as for `byValue`;
-   * undefined if the value has one spelling, `unlisted` if its spellings can't be listed.
+   * The spellings of a fixed value that becomes a JSON string. There is no pattern for a value with one spelling,
+   * and `unlisted` names a type whose spellings can't be listed.
    */
   fixedForms(type: SimpleTypeRef, lexical: string, from?: Element): { pattern?: string } | { unlisted: string } {
     if (this.jsonType(type, from) !== 'string') {
@@ -1007,7 +1045,7 @@ export class SimpleTypes {
    * The built-in type that compares a value and the value as it normalizes it: for a union, those of the member
    * that accepts the value first.
    */
-  private valueOf(type: SimpleTypeRef, lexical: string, from?: Element, depth = 0): { builtin: string; text: string } {
+  private valueOf(type: SimpleTypeRef, lexical: string, from?: Element, depth = 0): AtomicValue {
     const derivation = this.derive(type, from);
     if (derivation.union && depth < 20) {
       return this.unionValueOf(derivation.union, lexical, depth);
@@ -1015,11 +1053,7 @@ export class SimpleTypes {
     return { builtin: derivation.builtin, text: normalizeWhiteSpace(lexical, this.whiteSpace(type, from)) };
   }
 
-  private unionValueOf(
-    union: NonNullable<Derivation['union']>,
-    lexical: string,
-    depth = 0,
-  ): { builtin: string; text: string } {
+  private unionValueOf(union: NonNullable<Derivation['union']>, lexical: string, depth = 0): AtomicValue {
     const member = union.members[Math.max(0, this.memberIndex(union, lexical))];
     return member ? this.valueOf(member, lexical, union.node, depth + 1) : { builtin: 'string', text: lexical };
   }
@@ -1047,7 +1081,7 @@ export class SimpleTypes {
       numeric.totalDigits !== undefined
         ? Math.max(0, numeric.totalDigits - (fraction ?? 0))
         : bounded
-          ? String(Math.trunc(extent)).length
+          ? Number(Math.max(1, extent).toExponential().split('e')[1]) + 1
           : Infinity;
     if (!enumerated && fraction !== undefined && whole + fraction > 15) {
       this.problems.warning(
@@ -1158,8 +1192,7 @@ export class SimpleTypes {
           }
         } else if (facet.localName === 'enumeration') {
           // An enumeration value is a value of the member that accepts it first, normalized as that member does.
-          const lexical = attr(facet, 'value') ?? '';
-          values.push(schema.type === 'string' ? this.memberText(union, lexical) : lexical);
+          values.push(attr(facet, 'value') ?? '');
         } else if (facet.localName !== 'whiteSpace') {
           this.problems.error('unsupported-facet', `xs:${facet.localName} on a union is not supported`, this.at(facet));
         }
@@ -1168,15 +1201,24 @@ export class SimpleTypes {
         patternSteps.push(patterns);
       }
       if (values.length > 0) {
-        enumeration = { values: this.withinBase(values, enumeration?.values, schema.type, step.node), at: step.node };
+        const kept = this.withinBase(
+          values,
+          enumeration?.values,
+          (lexical) => {
+            const { builtin, text } = this.unionValueOf(union, lexical);
+            return valueKey(builtin, text);
+          },
+          step.node,
+        );
+        enumeration = { values: kept, at: step.node };
       }
     }
     if (patternSteps.length > 0 && schema.type === 'string') {
       schema.pattern = combinePatterns(patternSteps);
-    } else if (patternSteps.length > 0 && enumeration === undefined) {
+    } else if (patternSteps.length > 0) {
       this.problems.warning(
         'lexical-pattern',
-        `a pattern on a union of ${schema.type ?? ''} types restricts the XML text; JSON values are not checked against it`,
+        `a pattern on a union of ${json ?? 'simple'} types restricts the XML text; JSON values are not checked against it`,
         at,
       );
     }
@@ -1185,9 +1227,29 @@ export class SimpleTypes {
     if (enumeration) {
       // The enumeration lists values; the branches stay, so that a reader still knows how each member normalizes.
       const types = specialValues ? withSpecials(json, memberTypes) : schema.type;
-      out = enumSchema(schema, enumeration.values, this.problems, this.at(enumeration.at), types);
       if (schema.type === 'string') {
-        ({ schema: out, unlisted } = this.byValue(out, (lexical) => this.unionValueOf(union, lexical)));
+        const values = new Map(
+          enumeration.values.map((lexical) => {
+            const value = this.unionValueOf(union, lexical);
+            return [value.text, value] as const;
+          }),
+        );
+        ({ schema: out, unlisted } = this.stringEnumeration(
+          schema,
+          [...values.keys()],
+          this.at(enumeration.at),
+          (text) => values.get(text) ?? { builtin: 'string', text },
+        ));
+        if (json === undefined && !withList && unchecked.length === 0 && out.pattern !== undefined) {
+          const byMember = this.unionAliasConstraints(union, members, [...values.values()]);
+          if (byMember !== undefined) {
+            out.allOf = [byMember];
+          }
+        }
+      } else if (specialValues) {
+        out = this.numericUnionEnumeration(schema, enumeration.values, union, this.at(enumeration.at), types);
+      } else {
+        out = enumSchema(schema, enumeration.values, this.problems, this.at(enumeration.at), types);
       }
       out = branchesNeeded && schema.anyOf ? { ...out, anyOf: schema.anyOf } : out;
     }
@@ -1203,6 +1265,96 @@ export class SimpleTypes {
       );
     }
     return out;
+  }
+
+  /** An alternate spelling still has to select a member of the same primitive type, in union order. */
+  private unionAliasConstraints(
+    union: NonNullable<Derivation['union']>,
+    forms: JsonSchema[],
+    values: AtomicValue[],
+  ): JsonSchema | undefined {
+    const members = union.members.map((member) => this.derive(member, union.node));
+    if (members.some((member) => member.variety !== 'atomic')) {
+      return undefined;
+    }
+    const types = members.map((member) => primitiveType(member.builtin));
+    const first = members[0];
+    const byType = new Map<string, { patterns: string[]; checkOrder: boolean }>();
+    for (const { builtin, text } of values) {
+      const type = primitiveType(builtin);
+      const group = byType.get(type) ?? { patterns: [], checkOrder: false };
+      const alias = equalForms(builtin, text);
+      group.patterns.push(alias ?? escapePattern(text));
+      // With the unrestricted matching type first, every equivalent spelling still selects that type.
+      group.checkOrder ||= alias !== undefined && (first?.builtin !== builtin || first.steps.length > 0);
+      byType.set(type, group);
+    }
+    const checks = new Map<string, JsonSchema[]>(
+      [...byType].filter(([, group]) => group.checkOrder).map(([type]) => [type, []]),
+    );
+    if (checks.size === 0) {
+      return undefined;
+    }
+    const preceding = new Map<string, JsonSchema[]>();
+    let entries = byType.size;
+    forms.forEach((form, index) => {
+      const type = types[index] as string;
+      const own = preceding.get(type) ?? [];
+      const check = checks.get(type);
+      if (check !== undefined) {
+        const excluded = index - own.length;
+        entries += 1 + excluded;
+        this.ensureEntries?.(entries);
+        if (excluded === 0) {
+          check.push(form);
+        } else {
+          const earlier = [...preceding].flatMap(([before, schemas]) => (before === type ? [] : schemas));
+          check.push({ allOf: [form, { not: { anyOf: earlier } }] });
+        }
+      }
+      own.push(form);
+      preceding.set(type, own);
+    });
+    return {
+      anyOf: [...byType].map(([type, { patterns }]) => {
+        const match: JsonSchema = { pattern: `^(?:${patterns.join('|')})$` };
+        const sameType = checks.get(type);
+        if (sameType !== undefined) {
+          match.anyOf = sameType;
+        }
+        return match;
+      }),
+    };
+  }
+
+  private numericUnionEnumeration(
+    schema: JsonSchema,
+    values: string[],
+    union: NonNullable<Derivation['union']>,
+    at: At | undefined,
+    types: JsonType | JsonType[] | undefined,
+  ): JsonSchema {
+    const ordinary: string[] = [];
+    const floats: string[] = [];
+    for (const lexical of values) {
+      const { builtin, text } = this.unionValueOf(union, lexical);
+      if (builtin === 'float') {
+        floats.push(floatOverflow(text) ?? text);
+      } else {
+        ordinary.push(lexical);
+      }
+    }
+    const out = enumSchema(schema, ordinary, this.problems, at, types);
+    if (floats.length === 0) {
+      return out;
+    }
+    const enumerated = enumSchema(schema, floats, this.problems, at, types);
+    const distinct = new Map((enumerated.enum ?? []).map((value) => [floatKey(value), value as number | string]));
+    const branches = [...distinct.values()].map(floatValueSchema);
+    if (out.enum !== undefined) {
+      branches.push(out);
+    }
+    return branches.length > 1 ? { anyOf: branches } : (branches[0] ?? out);
   }
 
   /**
@@ -1235,14 +1387,18 @@ export class SimpleTypes {
     const items: JsonSchema = { ...item };
     delete items.description;
     const checkItems = this.checker() === this ? items : this.checker().schema(list.item, list.node);
-    // Items of xs:float compare as 32-bit floats: lists with the same floats are the same value however written.
-    const float = this.isFloat(list.item, list.node);
-    const key = (value: unknown[]): string => JSON.stringify(float ? value.map(floatKey) : value);
+    const key = ({ lexical }: ListValue): string =>
+      JSON.stringify(
+        listParts(lexical).map((part) => {
+          const { builtin, text } = this.valueOf(list.item, part, list.node);
+          return valueKey(builtin, text);
+        }),
+      );
     let min = list.nonEmpty ? 1 : 0;
     let max = Infinity;
-    let enumeration: { values: unknown[][]; at: Element } | undefined;
+    let enumeration: { values: ListValue[]; at: Element } | undefined;
     for (const step of derivation.steps) {
-      const values: unknown[][] = [];
+      const values: ListValue[] = [];
       for (const facet of step.facets) {
         const value = attr(facet, 'value') ?? '';
         const facetAt = this.at(facet);
@@ -1278,7 +1434,7 @@ export class SimpleTypes {
             if ('error' in converted) {
               this.problems.error('invalid-facet', converted.error, facetAt);
             } else {
-              values.push(converted.value);
+              values.push({ lexical: value, items: converted.value });
             }
             break;
           }
@@ -1298,7 +1454,7 @@ export class SimpleTypes {
           if (allowed && !allowed.has(key(v))) {
             this.problems.error(
               'invalid-facet',
-              `enumeration value ${JSON.stringify(v)} is not in the base enumeration`,
+              `enumeration value ${JSON.stringify(v.items)} is not in the base enumeration`,
               this.at(step.node),
             );
             return false;
@@ -1316,32 +1472,38 @@ export class SimpleTypes {
       schema.maxItems = max;
     }
     if (enumeration) {
-      const kept = enumeration.values.filter((v) => {
+      const kept = enumeration.values.filter(({ items: value }) => {
         const reason =
-          v.length < min
+          value.length < min
             ? `fewer than ${min} items`
-            : v.length > max
+            : value.length > max
               ? `more than ${max} items`
-              : itemViolation(checkItems, v);
+              : itemViolation(checkItems, value);
         if (reason) {
           this.problems.warning(
             'unreachable-enumeration',
-            `enumeration value ${JSON.stringify(v)} is left out: ${reason}`,
+            `enumeration value ${JSON.stringify(value)} is left out: ${reason}`,
             this.at(enumeration?.at),
           );
         }
         return !reason;
       });
-      const keys = kept.map(key);
-      const distinct = kept.filter((_, i) => keys.indexOf(keys[i] as string) === i);
+      const distinct = [...new Map(kept.map((value) => [key(value), value])).values()];
       if (distinct.length === 0) {
         schema.not = {};
-      } else if (float) {
-        // Each value is one list of floats, item by item; values that overlap make an anyOf, not a oneOf.
-        const tuples = distinct.map(floatTuple);
-        Object.assign(schema, tuples.length === 1 ? tuples[0] : { anyOf: tuples });
       } else {
-        schema.enum = distinct;
+        const tuples = distinct.map((value) => this.listTuple(list, value));
+        if (tuples.some((tuple) => tuple !== undefined)) {
+          const alternatives = distinct.map(({ items: value }, i) => tuples[i] ?? { const: value });
+          if (alternatives.length === 1) {
+            // Keep items at the outer level so its facets still apply to every item in the tuple.
+            schema.allOf = alternatives;
+          } else {
+            schema.anyOf = alternatives;
+          }
+        } else {
+          schema.enum = distinct.map((value) => value.items);
+        }
       }
     }
     if (this.options.xml !== false) {
@@ -1350,13 +1512,40 @@ export class SimpleTypes {
     return schema;
   }
 
+  /** A list value with interchangeable item spellings needs one constraint for each item. */
+  private listTuple(list: NonNullable<Derivation['list']>, { lexical, items }: ListValue): JsonSchema | undefined {
+    const json = this.jsonType(list.item, list.node);
+    if (this.isFloat(list.item, list.node)) {
+      return floatTuple(items);
+    }
+    const equivalents = listParts(lexical).map((part, i) => {
+      const { builtin, text } = this.valueOf(list.item, part, list.node);
+      if (json === 'string') {
+        const pattern = equalForms(builtin, text);
+        return pattern === undefined ? undefined : { type: 'string' as const, pattern: `^(?:${pattern})$` };
+      }
+      if (builtin === 'float') {
+        return floatValueSchema(floatOverflow(text) ?? (items[i] as number | string));
+      }
+      return undefined;
+    });
+    return equivalents.some((item) => item !== undefined)
+      ? itemTuple(items.map((value, i) => equivalents[i] ?? { const: value }))
+      : undefined;
+  }
+
+  /** The array constraint for a fixed list value when item spellings are interchangeable. */
+  fixedListForms(type: SimpleTypeRef, lexical: string, items: unknown[], from?: Element): JsonSchema | undefined {
+    const list = this.derive(type, from).list;
+    return list === undefined ? undefined : this.listTuple(list, { lexical, items });
+  }
+
   /** The items of a lexical list value as JSON: collapsed, split at spaces, each converted like a simple value. */
   private listToJson(
     list: NonNullable<Derivation['list']>,
     lexical: string,
   ): { value: unknown[]; rounded?: true } | { error: string } {
-    const text = normalizeWhiteSpace(lexical, 'collapse');
-    const parts = text === '' ? [] : text.split(' ');
+    const parts = listParts(lexical);
     const json = this.jsonType(list.item, list.node);
     const float = this.isFloat(list.item, list.node);
     const out: unknown[] = [];
@@ -1551,7 +1740,19 @@ export class SimpleTypes {
       types.memberForms.set(node, schemas);
     }
     const normalized = members.map((member) => normalizeWhiteSpace(lexical, this.whiteSpace(member, node)));
-    return schemas.findIndex((schema, i) => violation(schema, normalized[i]) === undefined);
+    return schemas.findIndex((schema, i) => {
+      const member = members[i];
+      const text = normalized[i];
+      if (member === undefined || text === undefined || violation(schema, text) !== undefined) {
+        return false;
+      }
+      const json = types.jsonType(member, node);
+      if (json === 'string' || json === 'array' || json === undefined) {
+        return true;
+      }
+      const converted = types.valueToJson(member, text, node);
+      return 'value' in converted && violation(types.schema(member, node), converted.value) === undefined;
+    });
   }
 
   /**
@@ -1570,19 +1771,15 @@ export class SimpleTypes {
   private withinBase(
     values: string[],
     base: string[] | undefined,
-    json: JsonType | JsonType[] | undefined,
+    key: (lexical: string) => string,
     node: Element,
   ): string[] {
     if (base === undefined) {
       return values;
     }
-    const valueOf = (lexical: string) => {
-      const converted = lexicalToJson(json, lexical);
-      return 'value' in converted ? converted.value : lexical;
-    };
-    const allowed = new Set(base.map(valueOf));
+    const allowed = new Set(base.map(key));
     return values.filter((value) => {
-      if (!allowed.has(valueOf(value))) {
+      if (!allowed.has(key(value))) {
         this.problems.error(
           'invalid-facet',
           `enumeration value ${value} is not in the base enumeration`,
@@ -1619,16 +1816,25 @@ function itemViolation(items: JsonSchema, value: unknown[]): string | undefined 
  * The JSON arrays that are the same list of xs:float values as `value`: exactly as many items, each one the same float
  * as the item at its place (see `floatValueSchema`). The empty list is the empty array; `prefixItems` must not be empty.
  */
-export function floatTuple(value: unknown[]): JsonSchema {
-  if (value.length === 0) {
+function floatTuple(value: unknown[]): JsonSchema {
+  return itemTuple(value.map((item) => floatValueSchema(item as number | string)));
+}
+
+function itemTuple(items: JsonSchema[]): JsonSchema {
+  if (items.length === 0) {
     return { type: 'array', maxItems: 0 };
   }
   return {
     type: 'array',
-    prefixItems: value.map((item) => floatValueSchema(item as number | string)),
-    minItems: value.length,
-    maxItems: value.length,
+    prefixItems: items,
+    minItems: items.length,
+    maxItems: items.length,
   };
+}
+
+function listParts(lexical: string): string[] {
+  const text = normalizeWhiteSpace(lexical, 'collapse');
+  return text === '' ? [] : text.split(' ');
 }
 
 /** The JSON type all members of a union share, with integer and number counted as number; undefined if they differ. */
