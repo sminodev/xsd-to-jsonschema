@@ -8,7 +8,7 @@
 
 import type { Element, Node } from '@xmldom/xmldom';
 import { constraintOf, intersect, union, type WildcardInEffect } from './attribute-wildcard.js';
-import { type GroupKeys, occurs, type Recorder } from './content-model.js';
+import { emptyContent, type GroupKeys, occurs, type Recorder } from './content-model.js';
 import { attributeKey, elementKey } from './keys.js';
 import { blockedBy, Polymorphism } from './polymorphism.js';
 import type { Problems } from './problems.js';
@@ -383,7 +383,9 @@ export class StructureBuilder {
   private globals(): Structure['globals'] {
     const elements = [...this.set.components.element.keys()].sort();
     const attributes: AttributeNode[] = [];
-    for (const [name, component] of [...this.set.components.attribute].sort(([a], [b]) => a.localeCompare(b))) {
+    for (const [name, component] of [...this.set.components.attribute].sort(([a], [b]) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    )) {
       // Counted once it is taken.
       this.quiet += 1;
       let read: ReturnType<StructureBuilder['attribute']>;
@@ -410,8 +412,7 @@ export class StructureBuilder {
     }
   }
 
-  /** Gives each problem to the nearest node of the tree that contains its place; returns the rest. */
-  /** Gives each problem of the result, the first `count`, to the nodes it concerns; later ones are dropped. */
+  /** Associates the first `count` problems with their nearest report nodes and returns those without a node. */
   private place(count: number): number[] {
     const unplaced: number[] = [];
     this.problems.nodes.slice(0, count).forEach((at, index) => {
@@ -499,9 +500,12 @@ export class StructureBuilder {
     if (final !== undefined) {
       node.final = final;
     }
-    const typeName = this.poly.typeName(decl);
-    const anonymousComplex = xsChild(decl, 'complexType');
-    const anonymousSimple = xsChild(decl, 'simpleType');
+    const typeOwner = this.poly.typeOwner(decl);
+    const typeName = this.poly.typeName(typeOwner);
+    const anonymousComplex = xsChild(typeOwner, 'complexType');
+    const anonymousSimple = xsChild(typeOwner, 'simpleType');
+    const ownerDoc = this.set.documentOf(typeOwner) ?? doc;
+    const ownerName = typeOwner === decl ? name : clark(ownerDoc.targetNamespace, attr(typeOwner, 'name') ?? '');
     let value: ValueFacets | undefined;
     if (typeName !== undefined) {
       node.type = this.typeId(typeName);
@@ -515,11 +519,11 @@ export class StructureBuilder {
         node.typeAlternatives = alternatives;
       }
     } else if (anonymousComplex) {
-      node.type = this.anonymousComplex(anonymousComplex, doc, name, global);
+      node.type = this.anonymousComplex(anonymousComplex, ownerDoc, ownerName, global, name);
       const entry = this.types[node.type];
       value = entry?.kind === 'complex' ? entry.text?.value : undefined;
     } else if (anonymousSimple) {
-      node.type = this.anonymousSimple(anonymousSimple, name);
+      node.type = this.anonymousSimple(anonymousSimple, ownerName);
       const entry = this.types[node.type];
       value = entry?.kind === 'simple' ? entry.facets : undefined;
     } else {
@@ -622,14 +626,20 @@ export class StructureBuilder {
     return id;
   }
 
-  private anonymousComplex(node: Element, doc: SchemaDocument, owner: string, global: boolean): string {
+  private anonymousComplex(
+    node: Element,
+    doc: SchemaDocument,
+    owner: string,
+    global: boolean,
+    elementName: string,
+  ): string {
     const known = this.anonymous.get(node);
     if (known !== undefined) {
       return known;
     }
     const id = this.nextId(node);
     let pointer: string | undefined;
-    if (global && owner === this.rootId) {
+    if (global && elementName === this.rootId) {
       pointer = '';
     } else if (global) {
       const definition = this.definitionName('element', owner);
@@ -672,6 +682,24 @@ export class StructureBuilder {
       const inline = xsChild(restriction, 'simpleType');
       if (inline) {
         entry.base = this.anonymousSimple(inline, naming.name ?? naming.owner ?? '');
+      }
+    }
+    const collection = xsChild(node, 'list') ?? xsChild(node, 'union');
+    if (collection) {
+      if (collection.localName === 'list') {
+        const item = attr(collection, 'itemType');
+        if (item !== undefined) {
+          this.typeId(this.set.resolveQName(collection, item));
+        }
+      } else {
+        for (const name of (attr(collection, 'memberTypes') ?? '').split(/[ \t\n\r]+/).filter(Boolean)) {
+          this.typeId(this.set.resolveQName(collection, name));
+        }
+      }
+      for (const inline of xsChildren(collection)) {
+        if (inline.localName === 'simpleType') {
+          this.anonymousSimple(inline, naming.name ?? naming.owner ?? '');
+        }
       }
     }
     const idType = idTypeOf(facets);
@@ -720,7 +748,12 @@ export class StructureBuilder {
       const base = this.set.resolveQName(derivation, attr(derivation, 'base') ?? '');
       entry.derivation = { base: this.typeId(base), method: derivation.localName };
       // An extension without content of its own and without mixed has the content type of its base, mixed included.
-      if (complexContent && derivation.localName === 'extension' && !entry.mixed && emptyContent(derivation)) {
+      if (
+        complexContent &&
+        derivation.localName === 'extension' &&
+        !entry.mixed &&
+        emptyContent(derivation, this.set)
+      ) {
         const inherited = this.types[entry.derivation.base];
         if (base.ns === XS && base.local === 'anyType') {
           entry.mixed = true;
@@ -1273,29 +1306,4 @@ function joined(own: EffectiveWildcard, base: EffectiveWildcard): EffectiveWildc
     return { uncertain: 'the attribute wildcards of the extension and its base have no expressible union' };
   }
   return result({ namespaces, processContents: own.wildcard.processContents });
-}
-
-/** Whether a derivation has no content of its own: no particle, or only groups without particles or occurrences. */
-function emptyContent(derivation: Element): boolean {
-  const model = xsChildren(derivation).find((c) => ['sequence', 'all', 'choice', 'group'].includes(c.localName ?? ''));
-  return model === undefined || emptyParticle(model);
-}
-
-function emptyParticle(particle: Element): boolean {
-  const { min, max } = occurs(particle);
-  if (max === 0) {
-    return true;
-  }
-  const children = xsChildren(particle).filter((c) =>
-    ['element', 'any', 'sequence', 'choice', 'group', 'all'].includes(c.localName ?? ''),
-  );
-  switch (particle.localName) {
-    case 'sequence':
-    case 'all':
-      return children.every(emptyParticle);
-    case 'choice':
-      return children.length === 0 && min === 0;
-    default:
-      return false;
-  }
 }

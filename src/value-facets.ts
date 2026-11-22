@@ -3,6 +3,7 @@
 
 import type { Element } from '@xmldom/xmldom';
 import { attr, type QName, type SchemaSet, XS, xsChild, xsChildren } from './schema-set.js';
+import { supportsAtomicLength, xmlTrim } from './simple-values.js';
 
 /** The facets of a value; see docs/structure.md. */
 export interface ValueFacets {
@@ -38,9 +39,23 @@ export interface ValueFacets {
 /** The built-in list types and the types of their items. */
 const BUILTIN_LISTS: Record<string, string> = { NMTOKENS: 'NMTOKEN', IDREFS: 'IDREF', ENTITIES: 'ENTITY' };
 
-const NUMBER_FACETS = ['length', 'minLength', 'maxLength', 'totalDigits', 'fractionDigits'] as const;
 const BOUND_FACETS = ['minInclusive', 'maxInclusive', 'minExclusive', 'maxExclusive'] as const;
 const WHITESPACE = ['preserve', 'replace', 'collapse'] as const;
+const INTEGER_BUILTINS = new Set([
+  'integer',
+  'nonPositiveInteger',
+  'negativeInteger',
+  'long',
+  'int',
+  'short',
+  'byte',
+  'nonNegativeInteger',
+  'unsignedLong',
+  'unsignedInt',
+  'unsignedShort',
+  'unsignedByte',
+  'positiveInteger',
+]);
 
 function builtinWhiteSpace(local: string): 'preserve' | 'replace' | 'collapse' {
   if (local === 'string' || local === 'anySimpleType') {
@@ -59,10 +74,9 @@ export function builtinFacets(local: string): ValueFacets {
 }
 
 /**
- * Adds the facets of one restriction step to those of its base. A valid restriction only narrows, so a facet of the
- * step replaces the one of the base, and a bound of the step replaces the base's bound on the same side, inclusive or
- * exclusive; `length` replaces `minLength` and `maxLength`. Patterns add a step, and enumerations replace the base's
- * list.
+ * Adds the facets of one restriction step to those of its base. Length, digits, and whitespace can only narrow
+ * the inherited constraints. A bound of the step replaces the base's bound on the same side. Patterns add a
+ * step, and enumerations replace the base's list.
  */
 export function restrict(base: ValueFacets, facets: readonly Element[]): ValueFacets {
   const out: ValueFacets = { ...base };
@@ -79,15 +93,31 @@ export function restrict(base: ValueFacets, facets: readonly Element[]): ValueFa
       enumeration.push(value);
     } else if (name === 'pattern') {
       patterns.push(value);
-    } else if ((NUMBER_FACETS as readonly string[]).includes(name)) {
-      const number = Number(value.trim());
-      if (Number.isSafeInteger(number)) {
-        out[name as (typeof NUMBER_FACETS)[number]] = number;
+    } else if (name === 'length' || name === 'minLength' || name === 'maxLength') {
+      if (base.variety === 'list' || (base.variety === 'atomic' && supportsAtomicLength(base.builtin))) {
+        const number = count(value, 0);
+        const min = out.length ?? out.minLength ?? (Object.hasOwn(BUILTIN_LISTS, base.builtin) ? 1 : 0);
+        const max = out.length ?? out.maxLength ?? Infinity;
+        if (number !== undefined && number >= min && number <= max) {
+          out[name] = number;
+        }
+      }
+    } else if (name === 'totalDigits' || name === 'fractionDigits') {
+      const integer = INTEGER_BUILTINS.has(base.builtin);
+      if (base.variety === 'atomic' && (base.builtin === 'decimal' || integer)) {
+        const number = count(value, name === 'totalDigits' ? 1 : 0);
+        const max = Math.min(out[name] ?? Infinity, name === 'fractionDigits' && integer ? 0 : Infinity);
+        if (number !== undefined && number <= max) {
+          out[name] = number;
+        }
       }
     } else if ((BOUND_FACETS as readonly string[]).includes(name)) {
       out[name as (typeof BOUND_FACETS)[number]] = value.trim();
-    } else if (name === 'whiteSpace' && (WHITESPACE as readonly string[]).includes(value.trim())) {
-      out.whiteSpace = value.trim() as (typeof WHITESPACE)[number];
+    } else if (name === 'whiteSpace' && out.whiteSpace !== undefined) {
+      const normalized = WHITESPACE.find((mode) => mode === xmlTrim(value));
+      if (normalized !== undefined && WHITESPACE.indexOf(normalized) >= WHITESPACE.indexOf(out.whiteSpace)) {
+        out.whiteSpace = normalized;
+      }
     }
   }
   if (enumeration.length > 0) {
@@ -106,10 +136,23 @@ export function restrict(base: ValueFacets, facets: readonly Element[]): ValueFa
     delete out.minLength;
     delete out.maxLength;
   }
+  if (out.fractionDigits !== undefined && out.fractionDigits > (out.totalDigits ?? Infinity)) {
+    if (base.fractionDigits === undefined) {
+      delete out.fractionDigits;
+    } else {
+      out.fractionDigits = base.fractionDigits;
+    }
+  }
   if (patterns.length > 0) {
     out.patterns = [...(base.patterns ?? []), patterns];
   }
   return out;
+}
+
+function count(value: string, least: number): number | undefined {
+  const text = xmlTrim(value);
+  const number = Number(text);
+  return /^\+?[0-9]+$/.test(text) && Number.isSafeInteger(number) && number >= least ? number : undefined;
 }
 
 /** Reads the facets of simple types; a named type is read once. */

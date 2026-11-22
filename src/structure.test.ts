@@ -420,6 +420,59 @@ describe('describeSchema', () => {
       ]);
       expect(element(model, 1)).toMatchObject({ global: true, max: 'unbounded', pointer: '/properties/Item' });
     });
+
+    it.each(['', ' abstract="true"'])('shares the head’s anonymous type with its substitutes%s', (headAttributes) => {
+      const files = {
+        'a.xsd': schema(
+          `
+          <xs:import namespace="urn:head" schemaLocation="head.xsd"/>
+          <xs:element name="Sub" substitutionGroup="h:Head"/>
+          <xs:element name="Root"><xs:complexType><xs:sequence>
+            <xs:element ref="h:Head"/>
+          </xs:sequence></xs:complexType></xs:element>`,
+          'urn:t',
+          'xmlns:h="urn:head"',
+        ),
+        'head.xsd': schema(
+          `
+          <xs:element name="Head" block="restriction"${headAttributes}><xs:complexType><xs:sequence>
+            <xs:element name="x" type="xs:int"/>
+          </xs:sequence><xs:attribute name="id" type="xs:ID" use="required"/></xs:complexType></xs:element>`,
+          'urn:head',
+        ),
+      };
+      const structure = structureOf(files, 'Root');
+      const head = element(content(structure), 0);
+      expect(head.substitutes).toMatchObject([{ name: '{urn:t}Sub', type: head.type }]);
+      const type = complex(structure, head.type);
+      expect(type.owner).toBe('{urn:head}Head');
+      expect(type.pointer).toBe('/$defs/Head');
+      expect(type.attributes).toMatchObject([{ name: '{}id', use: 'required', idType: 'ID' }]);
+      expect(element(type.content, 0)).toMatchObject({ name: '{urn:head}x', value: { builtin: 'int' } });
+
+      const substituteRoot = structureOf(files, 'Sub');
+      expect(complex(substituteRoot, substituteRoot.root.type)).toMatchObject({
+        owner: '{urn:head}Head',
+        pointer: '',
+      });
+    });
+
+    it('reports the facets of the anonymous simple type a substitute inherits', () => {
+      const structure = structureOf(
+        {
+          'a.xsd': schema(`
+            <xs:element name="Head" block="restriction"><xs:simpleType>
+              <xs:restriction base="xs:string"><xs:maxLength value="6"/></xs:restriction>
+            </xs:simpleType></xs:element>
+            <xs:element name="Sub" substitutionGroup="t:Head"/>`),
+        },
+        'Head',
+      );
+      expect(structure.root.substitutes).toMatchObject([
+        { name: '{urn:t}Sub', type: structure.root.type, value: { builtin: 'string', maxLength: 6 } },
+      ]);
+      expect(simple(structure, structure.root.type).owner).toBe('{urn:t}Head');
+    });
   });
 
   describe('names', () => {
@@ -480,6 +533,55 @@ describe('describeSchema', () => {
     expect(loop.facets.patterns).toEqual([['[0-9]{5}']]);
   });
 
+  it('describes the item and member types of lists and unions and places their problems', () => {
+    const { structure, problems } = report({
+      'a.xsd': schema(`
+        <xs:element name="r"><xs:complexType><xs:sequence>
+          <xs:element name="list" type="t:NamedList"/>
+          <xs:element name="union"><xs:simpleType><xs:union memberTypes="t:BadMember">
+            <xs:simpleType><xs:restriction base="xs:date"/></xs:simpleType>
+          </xs:union></xs:simpleType></xs:element>
+        </xs:sequence></xs:complexType></xs:element>
+        <xs:simpleType name="NamedList"><xs:list itemType="t:BadItem"/></xs:simpleType>
+        <xs:simpleType name="BadItem">
+          <xs:restriction base="xs:string"><xs:maxLength value="-2"/></xs:restriction>
+        </xs:simpleType>
+        <xs:simpleType name="BadMember">
+          <xs:restriction base="xs:string"><xs:maxLength value="invalid"/></xs:restriction>
+        </xs:simpleType>`),
+    });
+    expect(problems.map(({ code }) => code)).toEqual(['invalid-facet', 'invalid-facet']);
+    expect(structure).toBeDefined();
+    const item = simple(structure!, '{urn:t}BadItem');
+    const itemProblems = item.problems?.map((index) => problems[index]?.message);
+    const memberProblems = simple(structure!, '{urn:t}BadMember').problems?.map((index) => problems[index]?.message);
+    expect(item.facets.maxLength).toBeUndefined();
+    expect(itemProblems).toEqual([expect.stringContaining('"-2"')]);
+    expect(memberProblems).toEqual([expect.stringContaining('"invalid"')]);
+    expect(Object.values(structure!.types)).toContainEqual(
+      expect.objectContaining({
+        kind: 'simple',
+        owner: '{urn:t}union',
+        base: '{http://www.w3.org/2001/XMLSchema}date',
+      }),
+    );
+    expect(structure?.unplaced).toEqual([]);
+  });
+
+  it('sorts global attributes and elements by their expanded names in UTF-16 order', () => {
+    const structure = structureOf(
+      {
+        'a.xsd': schema(`
+          <xs:element name="B"/><xs:element name="a"/><xs:element name="A"/>
+          <xs:attribute name="B"/><xs:attribute name="a"/><xs:attribute name="A"/>`),
+      },
+      'A',
+    );
+    const names = ['{urn:t}A', '{urn:t}B', '{urn:t}a'];
+    expect(structure.globals.elements).toEqual(names);
+    expect(structure.globals.attributes.map(({ name }) => name)).toEqual(names);
+  });
+
   it('gives no structure without a schema', () => {
     const result = report({ 'a.xsd': schema('') });
     expect(result.schema).toBeUndefined();
@@ -496,6 +598,50 @@ describe('describeSchema', () => {
           <xs:attribute name="k" type="xs:string"/></xs:extension></xs:complexContent></xs:complexType>`),
     });
     expect(complex(structure, '{urn:t}D').mixed).toBe(true);
+  });
+
+  it('takes mixed from the base across references to an empty model group', () => {
+    const structure = structureOf({
+      'a.xsd': schema(`
+        <xs:element name="r" type="t:D"/>
+        <xs:group name="Empty"><xs:sequence/></xs:group>
+        <xs:group name="Wrapper"><xs:sequence><xs:group ref="t:Empty"/></xs:sequence></xs:group>
+        <xs:complexType name="B" mixed="true"><xs:sequence><xs:element name="b" type="xs:string"/></xs:sequence></xs:complexType>
+        <xs:complexType name="D"><xs:complexContent><xs:extension base="t:B">
+          <xs:group ref="t:Wrapper"/></xs:extension></xs:complexContent></xs:complexType>`),
+    });
+    expect(complex(structure, '{urn:t}D').mixed).toBe(true);
+  });
+
+  it('does not treat a circular model group as empty', () => {
+    const result = report({
+      'a.xsd': schema(`
+        <xs:element name="r" type="t:D"/>
+        <xs:group name="Loop"><xs:sequence><xs:group ref="t:Loop"/></xs:sequence></xs:group>
+        <xs:complexType name="B" mixed="true"><xs:sequence><xs:element name="b" type="xs:string"/></xs:sequence></xs:complexType>
+        <xs:complexType name="D"><xs:complexContent><xs:extension base="t:B">
+          <xs:group ref="t:Loop"/></xs:extension></xs:complexContent></xs:complexType>`),
+    });
+    expect(result.problems.map(({ code }) => code)).toContain('circular-group');
+    expect(complex(result.structure!, '{urn:t}D').mixed).toBe(false);
+  });
+
+  it('omits the pointer of an abstract base that has no definition', () => {
+    const { schema: out, structure } = report({
+      'a.xsd': schema(`
+        <xs:element name="r" type="t:Derived"/>
+        <xs:complexType name="Base" abstract="true">
+          <xs:sequence><xs:element name="a" type="xs:string"/></xs:sequence>
+        </xs:complexType>
+        <xs:complexType name="Derived"><xs:complexContent><xs:extension base="t:Base">
+          <xs:sequence><xs:element name="b" type="xs:string"/></xs:sequence>
+        </xs:extension></xs:complexContent></xs:complexType>`),
+    });
+    expect(out).toBeDefined();
+    expect(out?.$defs?.Base).toBeUndefined();
+    expect(complex(structure!, '{urn:t}Base')).toMatchObject({ abstract: true });
+    expect(complex(structure!, '{urn:t}Base').pointer).toBeUndefined();
+    expect(complex(structure!, '{urn:t}Derived').derivation).toEqual({ method: 'extension', base: '{urn:t}Base' });
   });
 
   it('gives an extension of anyType the content and attribute wildcard of anyType', () => {
@@ -604,6 +750,46 @@ describe('describeSchema', () => {
     expect([n.minInclusive, n.minExclusive, n.maxInclusive, n.maxExclusive]).toEqual([undefined, '5', '50', undefined]);
     const s = simple(structure, '{urn:t}S').facets;
     expect([s.length, s.minLength, s.maxLength]).toEqual([4, undefined, undefined]);
+  });
+
+  it('keeps inherited counts and whitespace when a restriction would loosen them', () => {
+    const structure = structureOf({
+      'a.xsd': schema(`
+        <xs:element name="r"><xs:complexType><xs:sequence>
+          <xs:element name="s" type="t:Derived"/><xs:element name="n" type="t:DerivedDigits"/>
+          <xs:element name="b" type="t:Flag"/><xs:element name="i" type="t:Integer"/>
+        </xs:sequence></xs:complexType></xs:element>
+        <xs:simpleType name="Base"><xs:restriction base="xs:token">
+          <xs:minLength value="5"/><xs:maxLength value="10"/>
+        </xs:restriction></xs:simpleType>
+        <xs:simpleType name="Derived"><xs:restriction base="t:Base">
+          <xs:minLength value="2"/><xs:maxLength value="20"/><xs:whiteSpace value="preserve"/><xs:length value="4"/>
+        </xs:restriction></xs:simpleType>
+        <xs:simpleType name="Digits"><xs:restriction base="xs:decimal">
+          <xs:totalDigits value="6"/><xs:fractionDigits value="3"/>
+        </xs:restriction></xs:simpleType>
+        <xs:simpleType name="DerivedDigits"><xs:restriction base="t:Digits">
+          <xs:totalDigits value=" +4 "/><xs:fractionDigits value="5"/>
+        </xs:restriction></xs:simpleType>
+        <xs:simpleType name="Flag"><xs:restriction base="xs:boolean">
+          <xs:length value="1"/><xs:totalDigits value="1"/>
+        </xs:restriction></xs:simpleType>
+        <xs:simpleType name="Integer"><xs:restriction base="xs:int">
+          <xs:fractionDigits value="2"/><xs:totalDigits value="0"/>
+        </xs:restriction></xs:simpleType>`),
+    });
+    expect(simple(structure, '{urn:t}Derived').facets).toEqual({
+      builtin: 'token',
+      variety: 'atomic',
+      whiteSpace: 'collapse',
+      minLength: 5,
+      maxLength: 10,
+    });
+    expect(simple(structure, '{urn:t}DerivedDigits').facets).toMatchObject({ totalDigits: 4, fractionDigits: 3 });
+    for (const name of ['Flag', 'Integer']) {
+      const facets = simple(structure, `{urn:t}${name}`).facets;
+      expect([facets.length, facets.totalDigits, facets.fractionDigits]).toEqual([undefined, undefined, undefined]);
+    }
   });
 
   it('takes mixed from complexContent where it says so, else from complexType', () => {
