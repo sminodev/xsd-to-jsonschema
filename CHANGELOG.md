@@ -50,8 +50,9 @@ Release versions follow [Semantic Versioning](http://semver.org/spec/v2.0.0.html
   between its definitions as `unsafe-input`. Read an XML declaration to its end, however long; one without `?>` is
   `invalid-xml`.
 - Document that Ajv also throws a `RangeError` for repeated choices nested about 200 deep.
-- Require Node.js 22.13 or later to support the ESLint 10 toolchain.
-- Check the npm package in CI on the exact minimum Node.js version.
+- Support Node.js 22.12.0 and later for the npm package. Development uses Node.js 22.13.0 or a later 22.x release,
+  Node.js 24, or Node.js 26.
+- Install and test the packed npm package in CI on Node.js 22.12.0.
 - Write a repeated sequence, choice or group reference as one property with an object per occurrence, such as
   `#sequence`. This replaces the `repeated-group` error.
 - Write an element name declared by several particles as one array. `duplicate-name` reports only names that can't share

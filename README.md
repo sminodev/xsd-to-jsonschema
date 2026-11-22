@@ -8,7 +8,10 @@ JSON representation and supported XSD constructs.
 
 ## Install
 
-The package is not on npm yet. Build a tarball from a clone and install it in your project:
+The package requires Node.js 22.12.0 or later and supports both ES module imports and CommonJS `require()`.
+
+The package is not on npm yet. Use a [supported development version of Node.js](docs/development.md) to build a tarball
+from a clone, then install it in your project.
 
 ```sh
 npm ci
@@ -18,8 +21,6 @@ npm install /path/to/xsd-to-jsonschema/xsd-to-jsonschema-1.0.0.tgz
 ```
 
 Once the package is published, `npm install xsd-to-jsonschema` replaces these steps.
-
-Node.js 22.13 or later is required. The package is an ES module, but `require()` is also supported on that runtime.
 
 ## Quick start
 

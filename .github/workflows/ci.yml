@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: ['22.13.0', '24']
+        node: ['22.13.0', '24', '26']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -29,3 +29,57 @@ jobs:
       - run: node dist/bin.js examples/order/order.xsd > /dev/null
       - run: npm pack --dry-run
       - run: npm audit --omit=dev
+
+  package-consumer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm pack --pack-destination "$RUNNER_TEMP"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.12.0'
+          package-manager-cache: false
+      - name: Install and test the packed package on Node.js 22.12.0
+        run: |
+          mkdir "$RUNNER_TEMP/package-consumer"
+          cd "$RUNNER_TEMP/package-consumer"
+          npm init -y
+          npm install --omit=dev --engine-strict "$RUNNER_TEMP"/xsd-to-jsonschema-*.tgz
+
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { readFileSync } from 'node:fs';
+          import { createRequire } from 'node:module';
+          import { dirname, join } from 'node:path';
+          import { convert } from 'xsd-to-jsonschema';
+          import { convertFile } from 'xsd-to-jsonschema/node';
+
+          const require = createRequire(import.meta.url);
+          const example = join(dirname(require.resolve('xsd-to-jsonschema/package.json')), 'examples/order');
+          const read = (file) => readFileSync(join(example, file), 'utf8');
+          const expected = read('order.schema.json').trimEnd();
+          const entry = 'order.xsd';
+          const input = { entry, files: read };
+          const entryPath = join(example, entry);
+
+          for (const result of [
+            convert(input),
+            convertFile(entryPath),
+            require('xsd-to-jsonschema').convert(input),
+            require('xsd-to-jsonschema/node').convertFile(entryPath),
+          ]) {
+            assert.equal(result.problems.some((problem) => problem.severity === 'error'), false);
+            assert.equal(JSON.stringify(result.schema, null, 2), expected);
+          }
+
+          for (const bin of ['xsd-to-jsonschema', 'xsd2json']) {
+            const output = execFileSync(`./node_modules/.bin/${bin}`, [entryPath], { encoding: 'utf8' });
+            assert.equal(output.trimEnd(), expected);
+          }
+          JS

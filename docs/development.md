@@ -1,7 +1,8 @@
 # Development
 
-Development requires Node.js 22.13 or later. The build compiles TypeScript sources to `dist/` with `tsc`;
-at runtime, the package depends only on `@xmldom/xmldom`.
+Use Node.js 22.13.0 or a later 22.x release, Node.js 24, or Node.js 26 for development. ESLint requires at least
+22.13.0 on the Node.js 22 line. The build compiles TypeScript sources to `dist/` with `tsc`. The built package
+runs on Node.js 22.12.0 or later and depends only on `@xmldom/xmldom` at runtime.
 
 ```sh
 npm ci
@@ -214,7 +215,7 @@ Both validators must agree with the expected result. Test cases must also accoun
 
 ## Pull requests
 
-Run these checks before submitting a pull request. CI runs the same checks on Node.js 22.13 and 24:
+Run these checks before submitting a pull request. CI runs them on Node.js 22.13.0, 24, and 26.
 
 ```sh
 npm run typecheck
@@ -223,6 +224,9 @@ npm run format:check
 npm run build
 npm test
 ```
+
+CI also installs the packed package in a fresh project on Node.js 22.12.0 and converts the bundled order example
+through both library entry points with `import` and `require()` and through both CLI aliases.
 
 ## Dependency updates
 
