@@ -2,6 +2,15 @@
   "name": "xsd-to-jsonschema",
   "version": "1.0.0",
   "description": "Converts XML Schemas into JSON Schema 2020-12.",
+  "author": "mino",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sminodev/xsd-to-jsonschema.git"
+  },
+  "homepage": "https://github.com/sminodev/xsd-to-jsonschema#readme",
+  "bugs": {
+    "url": "https://github.com/sminodev/xsd-to-jsonschema/issues"
+  },
   "scripts": {
     "test": "vitest run",
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
@@ -52,7 +61,8 @@
     "docs",
     "examples/order",
     "CHANGELOG.md",
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "SECURITY.md"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
