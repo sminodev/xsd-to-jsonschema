@@ -7,9 +7,9 @@ import { PROBLEM_CODES, Problems } from './problems.js';
 const SRC = dirname(fileURLToPath(import.meta.url));
 
 describe('the problem codes', () => {
-  it('are each explained in docs/output.md', () => {
-    const docs = readFileSync(join(SRC, '..', 'docs', 'output.md'), 'utf8');
-    const section = docs.slice(docs.indexOf('## Problems'), docs.indexOf('## Limits'));
+  it('are each explained in the diagnostics reference', () => {
+    const docs = readFileSync(join(SRC, '..', 'docs', 'diagnostics.md'), 'utf8');
+    const section = docs.slice(docs.indexOf('## Problems'));
     const documented = [...section.matchAll(/^\| `([a-z-]+)` +\|/gm)].map((m) => m[1]);
     expect(documented.sort()).toEqual([...PROBLEM_CODES].sort());
   });

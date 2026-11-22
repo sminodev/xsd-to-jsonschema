@@ -19,7 +19,7 @@ function golden(name: string, value: unknown): void {
 }
 
 describe('the order example', () => {
-  it('converts without problems to order.schema.json, and order.xml maps to order.json', async () => {
+  it('converts to order.schema.json with the documented warnings and maps order.xml to order.json', async () => {
     const order = read('order.xml');
     const variant = (from: string, to: string) => {
       expect(order).toContain(from);
@@ -89,35 +89,20 @@ describe('the order example', () => {
     golden('order.json', result.verdicts[0]?.value);
   });
 
-  it('is quoted correctly in the README', () => {
+  it('uses the generated pickup and delivery choice in the development guide', () => {
+    const guide = readFileSync(join(DIR, '..', '..', 'docs', 'development.md'), 'utf8');
+    const example = /```json\n([\s\S]*?)```/.exec(guide);
+    const schema = JSON.parse(read('order.schema.json')) as { allOf: unknown[] };
+    expect(JSON.parse(example?.[1] ?? 'null')).toEqual(schema.allOf[0]);
+  });
+
+  it('shows the XML and JSON forms of the first line price in the README', () => {
     const readme = readFileSync(join(DIR, '..', '..', 'README.md'), 'utf8');
-    const [excerpt, jsonForm] = [...readme.matchAll(/```json\n([\s\S]*?)```/g)].map(
-      (m) => JSON.parse(m[1] ?? '') as Record<string, unknown>,
-    );
-    const schema = JSON.parse(read('order.schema.json')) as Record<string, unknown>;
-    // The keys of `part` appear in `whole` in the same order, with the same values.
-    const quoted = (part: Record<string, unknown>, whole: Record<string, unknown>, path: string) => {
-      const keys = Object.keys(whole);
-      const positions = Object.keys(part).map((key) => keys.indexOf(key));
-      expect(
-        positions.every((p, i) => p >= 0 && (i === 0 || p > (positions[i - 1] ?? -1))),
-        `order of ${path}`,
-      ).toBe(true);
-    };
-    expect(excerpt).toBeDefined();
-    quoted(excerpt ?? {}, schema, 'the schema');
-    for (const [key, value] of Object.entries(excerpt ?? {})) {
-      if (key === 'properties' || key === '$defs') {
-        const part = value as Record<string, unknown>;
-        const whole = schema[key] as Record<string, unknown>;
-        quoted(part, whole, key);
-        for (const [name, sub] of Object.entries(part)) {
-          expect(sub, `${key}/${name}`).toEqual(whole[name]);
-        }
-      } else {
-        expect(value, key).toEqual(schema[key]);
-      }
-    }
-    expect(jsonForm).toEqual(JSON.parse(read('order.json')));
+    const xml = /```xml\n([\s\S]*?)```/.exec(readme)?.[1]?.trim();
+    const json = /```json\n([\s\S]*?)```/.exec(readme)?.[1];
+    const order = JSON.parse(read('order.json')) as { Line: { Price?: unknown }[] };
+    expect(xml).toBeDefined();
+    expect(xml).toBe(/<Price\b[^>]*>[^<]*<\/Price>/.exec(read('order.xml'))?.[0]);
+    expect(JSON.parse(json ?? '')).toEqual(order.Line[0]?.Price);
   });
 });

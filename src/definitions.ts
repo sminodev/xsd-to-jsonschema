@@ -63,8 +63,7 @@ function pointerEscape(name: string): string {
   return name.replace(/~/g, '~0').replace(/\//g, '~1');
 }
 
-// A short label for a namespace URI: its last two path segments, e.g. `orders_common` for
-// https://example.org/orders/common.
+// Keep the last two namespace segments so colliding type names stay readable in $defs.
 function namespaceLabel(ns: string): string {
   const segments = ns
     .replace(/^[a-z][a-z0-9+.-]*:(\/\/[^/]*)?/i, '')
